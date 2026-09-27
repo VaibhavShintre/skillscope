@@ -1,0 +1,143 @@
+classDiagram
+  direction LR
+
+  class Prompt {
+    +str id
+    +str text
+    +Expected expected
+    +Origin origin
+    +matches(skill: str) bool
+  }
+  class Config {
+    +str name
+    +list~str~ skills
+    +resolve(skills_dir: Path) list~str~
+  }
+  class Session {
+    +str config
+    +str prompt_id
+    +int repeat
+    +key() SessionKey
+  }
+  class SessionOptions {
+    +str model
+    +float budget_usd
+    +float timeout_s
+    +Path config_dir
+    +Path raw_dir
+  }
+  class SessionRecord {
+    +str run_id
+    +str config
+    +str prompt_id
+    +int repeat
+    +Outcome outcome
+    +list~str~ skills_invoked
+    +str first_skill
+    +Expected expected
+    +bool matched
+    +int exploration_calls
+    +int input_tokens
+    +int output_tokens
+    +float cost_usd
+    +CostSource cost_source
+    +int duration_ms
+    +str model
+    +str claude_version
+    +str error
+    +Path raw_path
+    +key() SessionKey
+  }
+
+  class Event {
+    <<abstract>>
+  }
+  class InitEvent {
+    +str model
+    +str claude_version
+  }
+  class AssistantEvent {
+    +list~ToolUse~ tool_uses
+    +str text
+    +Usage usage
+    +str stop_reason
+  }
+  class ResultEvent {
+    +float total_cost_usd
+    +int num_turns
+    +int duration_ms
+    +Usage usage
+    +bool is_error
+  }
+  class RawEvent {
+    +str line
+  }
+  class ToolUse {
+    +str name
+    +dict input
+  }
+  Event <|-- InitEvent
+  Event <|-- AssistantEvent
+  Event <|-- ResultEvent
+  Event <|-- RawEvent
+  AssistantEvent o-- ToolUse
+
+  class StreamParser {
+    +parse_line(line: str) Event
+  }
+  class SessionState {
+    +Outcome outcome
+    +list~str~ skills_invoked
+    +int exploration_calls
+    +Usage usage_total
+    +feed(event: Event) Verdict
+  }
+  class SessionRunner {
+    +run(workspace: Path, prompt: Prompt, opts: SessionOptions) SessionRecord
+    -build_argv() list~str~
+    -build_env() dict
+    -kill_group()
+    -estimate_cost(usage: Usage, model: str) float
+  }
+  class WorkspaceBuilder {
+    +build(repo: Path, skills_dir: Path, config: Config, root: Path) Path
+  }
+  class Planner {
+    +plan(prompts, configs, repeats, done) list~Session~
+  }
+  class Pool {
+    +run_all(sessions, parallel, cost_cap, runner) AsyncIterator~SessionRecord~
+  }
+  class EventLog {
+    +Path path
+    +append(record: SessionRecord)
+    +load() list~SessionRecord~
+    +done_keys() set~SessionKey~
+  }
+  class FireTable {
+    +fire_table(records, prompts, configs) Table
+  }
+  class FakeClaude {
+    <<test double on PATH>>
+    +replay(prompt: str)
+  }
+
+  Planner ..> Prompt
+  Planner ..> Config
+  Planner --> Session : creates
+  Planner ..> EventLog : done_keys()
+  Pool ..> Session
+  Pool --> SessionRunner : uses
+  Pool ..> EventLog : append()
+  SessionRunner --> StreamParser
+  SessionRunner --> SessionState
+  SessionRunner ..> WorkspaceBuilder : workspace path
+  SessionRunner --> SessionRecord : produces
+  StreamParser --> Event : produces
+  SessionState ..> Event : consumes
+  SessionRecord ..> Prompt : matched via expected
+  EventLog o-- SessionRecord
+  FireTable ..> SessionRecord
+  FireTable ..> Prompt
+  FireTable ..> Config
+  FakeClaude ..> SessionRunner : replaces real binary
