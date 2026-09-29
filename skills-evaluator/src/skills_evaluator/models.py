@@ -95,7 +95,7 @@ class SkillVerdict(BaseModel):
     precision: float
     recall: float
     singleton_score: float
-    leave_one_out_delta: float
+    leave_one_out_delta: float | None = None
     selected: bool
     reasons: list[str] = Field(default_factory=list)
 

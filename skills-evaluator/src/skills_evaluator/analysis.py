@@ -31,6 +31,13 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         )
         for config in plan.configurations
     }
+    measured = {config.id for config in plan.configurations if by_config[config.id]}
+    score_by_skills = {
+        frozenset(config.skill_ids): scores[config.id]
+        for config in plan.configurations
+        if config.id in measured
+    }
+    full_ids = frozenset(item.id for item in plan.candidates if not item.blocked)
     non_baseline = [config for config in plan.configurations if config.skill_ids]
     best_score = max((scores[config.id] for config in non_baseline), default=0.0)
     eligible = [config for config in non_baseline if scores[config.id] >= best_score - tolerance]
@@ -64,19 +71,24 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
             ),
             0.0,
         )
-        without = next(
-            (
-                scores[config.id]
-                for config in plan.configurations
-                if config.kind == "leave-one-out" and skill.id not in config.skill_ids
-            ),
-            best_score,
+        # Leave-one-out is "the full bundle minus this skill". The planner drops duplicate
+        # skill sets, so that config is often a singleton or the baseline; look it up by its
+        # skills, not by kind. None means it was not planned or has no completed sessions.
+        full_score = score_by_skills.get(full_ids)
+        without = (
+            score_by_skills.get(full_ids - {skill.id}) if skill.id in full_ids else None
         )
-        delta = scores.get("full", best_score) - without
+        delta = full_score - without if full_score is not None and without is not None else None
         reasons: list[str] = []
         if skill.blocked:
             verdict = "unsafe"
             reasons.append("Blocked by the static safety gate.")
+        elif skill.id in selected_ids and delta is None:
+            verdict = "unverified"
+            reasons.append(
+                "The full bundle without this skill was not measured, so its marginal "
+                "value is unknown."
+            )
         elif skill.id in selected_ids and delta >= 0.05:
             verdict = "essential"
             reasons.append(f"Removing it reduced the full-bundle score by {delta:.1%}.")
@@ -100,7 +112,7 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
                 precision=round(precision, 4),
                 recall=round(recall, 4),
                 singleton_score=round(singleton, 4),
-                leave_one_out_delta=round(delta, 4),
+                leave_one_out_delta=None if delta is None else round(delta, 4),
                 selected=skill.id in selected_ids,
                 reasons=reasons,
             )
