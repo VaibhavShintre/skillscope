@@ -17,6 +17,15 @@ The current MVP provides planning recommendations. Measured Claude trigger
 benchmarks will be connected through the runner spike documented under
 `docs/superpowers/`.
 
+## Skills Evaluator
+
+The new repository-oriented evaluator is implemented as a separate package in
+[`skills-evaluator/`](skills-evaluator/README.md). It profiles a local project,
+loads project or user-supplied Agent Skills, creates bounded skill-combination
+experiments, runs them through an Anthropic API harness, and produces a
+reproducible recommendation report. The SkillScope website remains available
+and unchanged under `src/skillscope/`.
+
 ## Run locally
 
 ```bash

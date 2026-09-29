@@ -1,0 +1,3 @@
+- id: user-browser-check
+  text: Verify the primary browser journey for this project.
+  expected_skill: browser-testing
