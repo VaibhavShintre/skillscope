@@ -4,49 +4,86 @@ classDiagram
   class Prompt {
     +str id
     +str text
-    +Expected expected
+    +list~str~ expected
     +Origin origin
     +matches(skill: str) bool
+  }
+  class CanonicalSkill {
+    +str folder_name
+    +str effective_name
+    +Path path
+    +str content_hash
+    +bool model_invocable
   }
   class Config {
     +str name
     +list~str~ skills
-    +resolve(skills_dir: Path) list~str~
+    +resolve(catalog) list~CanonicalSkill~
+  }
+  class RunManifest {
+    +int schema_version
+    +str repo_tree_hash
+    +str prompts_sha256
+    +str configs_sha256
+    +dict skill_hashes
+    +dict resolved_configs
+    +str model_id
+    +str claude_version
+    +int ordering_seed
+    +list~SessionKey~ planned_keys
+    +compare(other) list~ManifestDiff~
   }
   class Session {
     +str config
     +str prompt_id
     +int repeat
     +key() SessionKey
+    +safe_slug() str
   }
   class SessionOptions {
-    +str model
-    +float budget_usd
+    +str model_id
+    +float session_budget_usd
     +float timeout_s
-    +Path config_dir
+    +Path config_root
     +Path raw_dir
+    +str isolation_mode
   }
   class SessionRecord {
     +str run_id
-    +str config
-    +str prompt_id
-    +int repeat
+    +SessionKey key
     +Outcome outcome
-    +list~str~ skills_invoked
-    +str first_skill
-    +Expected expected
+    +str selected_skill
+    +bool skill_load_succeeded
+    +str skill_load_error
+    +list~str~ expected
     +bool matched
-    +int exploration_calls
-    +int input_tokens
-    +int output_tokens
+    +int skills_loaded
     +float cost_usd
     +CostSource cost_source
-    +int duration_ms
     +str model
     +str claude_version
-    +str error
+    +str termination_reason
     +Path raw_path
-    +key() SessionKey
+  }
+
+  class Preflight {
+    +check_runtime() RuntimeReport
+    +load_catalog(path) list~CanonicalSkill~
+    +validate(prompts, configs, catalog) ResolvedInputs
+  }
+  class ManifestStore {
+    +create(inputs, options, plan) RunManifest
+    +load(path) RunManifest
+    +require_match(existing, current)
+  }
+  class WorkspaceBuilder {
+    +build(repo, resolved_config, root) Path
+    -strip_project_customization(path)
+    -reject_external_symlinks(path)
+  }
+  class Planner {
+    +plan(prompts, configs, repeats, seed) list~Session~
+    +remaining(plan, done) list~Session~
   }
 
   class Event {
@@ -55,12 +92,18 @@ classDiagram
   class InitEvent {
     +str model
     +str claude_version
+    +list~str~ skills
   }
   class AssistantEvent {
     +list~ToolUse~ tool_uses
     +str text
     +Usage usage
     +str stop_reason
+  }
+  class ToolResultEvent {
+    +str tool_use_id
+    +str content
+    +bool is_error
   }
   class ResultEvent {
     +float total_cost_usd
@@ -73,11 +116,13 @@ classDiagram
     +str line
   }
   class ToolUse {
+    +str id
     +str name
     +dict input
   }
   Event <|-- InitEvent
   Event <|-- AssistantEvent
+  Event <|-- ToolResultEvent
   Event <|-- ResultEvent
   Event <|-- RawEvent
   AssistantEvent o-- ToolUse
@@ -87,57 +132,69 @@ classDiagram
   }
   class SessionState {
     +Outcome outcome
-    +list~str~ skills_invoked
+    +str selected_skill
+    +str selected_tool_use_id
+    +bool skill_load_succeeded
     +int exploration_calls
     +Usage usage_total
     +feed(event: Event) Verdict
   }
+  class ProcessController {
+    +spawn(argv, cwd, env) Process
+    +terminate_group(process, grace_s)
+    +wait(process) int
+  }
   class SessionRunner {
-    +run(workspace: Path, prompt: Prompt, opts: SessionOptions) SessionRecord
+    +run(workspace, prompt, session, opts) SessionRecord
     -build_argv() list~str~
     -build_env() dict
-    -kill_group()
-    -estimate_cost(usage: Usage, model: str) float
+    -unique_config_dir(session) Path
+    -estimate_cost(usage, model_id) float
   }
-  class WorkspaceBuilder {
-    +build(repo: Path, skills_dir: Path, config: Config, root: Path) Path
-  }
-  class Planner {
-    +plan(prompts, configs, repeats, done) list~Session~
-  }
-  class Pool {
-    +run_all(sessions, parallel, cost_cap, runner) AsyncIterator~SessionRecord~
+  class ReservedCostPool {
+    +float observed_cost
+    +float reserved_in_flight
+    +run(sessions, runner) AsyncIterator~SessionRecord~
+    -can_reserve() bool
   }
   class EventLog {
-    +Path path
     +append(record: SessionRecord)
     +load() list~SessionRecord~
     +done_keys() set~SessionKey~
   }
-  class FireTable {
-    +fire_table(records, prompts, configs) Table
+  class GateEvaluator {
+    +eligibility(records, manifest) Eligibility
+    +paired_effect(records) float
+    +bootstrap_interval(records, seed) Interval
+    +evaluate(records, manifest) GateResult
+  }
+  class TerminalReporter {
+    +render_progress(state)
+    +render_report(records, manifest, gate)
   }
   class FakeClaude {
     <<test double on PATH>>
     +replay(prompt: str)
+    +spawn_descendant()
   }
 
-  Planner ..> Prompt
-  Planner ..> Config
+  Preflight --> CanonicalSkill : resolves
+  Config --> CanonicalSkill : contains
+  ManifestStore --> RunManifest : creates and compares
   Planner --> Session : creates
-  Planner ..> EventLog : done_keys()
-  Pool ..> Session
-  Pool --> SessionRunner : uses
-  Pool ..> EventLog : append()
+  Planner ..> RunManifest : uses seed and keys
+  WorkspaceBuilder ..> CanonicalSkill : installs exactly
+  ReservedCostPool --> SessionRunner : invokes
+  ReservedCostPool ..> Session : schedules
+  SessionRunner --> ProcessController
   SessionRunner --> StreamParser
   SessionRunner --> SessionState
-  SessionRunner ..> WorkspaceBuilder : workspace path
   SessionRunner --> SessionRecord : produces
   StreamParser --> Event : produces
   SessionState ..> Event : consumes
-  SessionRecord ..> Prompt : matched via expected
   EventLog o-- SessionRecord
-  FireTable ..> SessionRecord
-  FireTable ..> Prompt
-  FireTable ..> Config
+  GateEvaluator ..> SessionRecord
+  GateEvaluator ..> RunManifest
+  TerminalReporter ..> GateEvaluator
+  TerminalReporter ..> EventLog
   FakeClaude ..> SessionRunner : replaces real binary

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>SkillScope — build a lean Claude skill catalog</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="SkillScope home">
+        <span class="brand-mark">S</span>
+        <span>SkillScope</span>
+      </a>
+      <nav>
+        <span class="local-pill" id="server-status"><span class="status-dot"></span> Connecting locally</span>
+        <button class="button ghost" id="privacy-button" type="button">Privacy center</button>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="eyebrow">Claude skill catalog intelligence</div>
+        <h1>Choose skills from project intent, not popularity.</h1>
+        <p class="hero-copy">
+          Describe what you are building. SkillScope maps your requirements to a lean,
+          ranked skill catalog and shows the evidence behind every recommendation.
+        </p>
+        <div class="trust-row">
+          <span>✓ No repository required</span>
+          <span>✓ No external requests</span>
+          <span>✓ Monitoring off by default</span>
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="Project recommendation workspace">
+        <form id="project-form" class="panel input-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="step-number">01</span>
+              <h2>Project context</h2>
+            </div>
+            <button class="text-button" id="sample-button" type="button">Load example</button>
+          </div>
+
+          <label>
+            Project name
+            <input id="name" name="name" required maxlength="120" placeholder="Acme Analytics">
+          </label>
+
+          <label>
+            What are you building?
+            <textarea id="description" name="description" rows="4" placeholder="A multi-tenant SaaS platform for agencies with team management, analytics and subscriptions."></textarea>
+          </label>
+
+          <label>
+            Product requirements
+            <textarea id="prd" name="prd" rows="7" placeholder="Paste a PRD, feature list, or user stories. This stays on your computer."></textarea>
+          </label>
+
+          <label>
+            Technical specification
+            <textarea id="technical-spec" name="technical_spec" rows="6" placeholder="Architecture, data model, integrations, testing, deployment and security requirements."></textarea>
+          </label>
+
+          <label>
+            Intended stack
+            <input id="stack" name="stack" placeholder="Next.js, React, TypeScript, PostgreSQL, Drizzle, Stripe">
+            <small>Comma-separated. SkillScope also infers technologies from your documents.</small>
+          </label>
+
+          <fieldset>
+            <legend><span class="step-number">02</span> Catalog posture</legend>
+            <div class="posture-grid">
+              <label class="posture-card">
+                <input type="radio" name="posture" value="lean">
+                <span class="posture-title">Lean</span>
+                <span>Smallest useful set with minimal overlap.</span>
+              </label>
+              <label class="posture-card selected">
+                <input type="radio" name="posture" value="balanced" checked>
+                <span class="posture-title">Balanced <em>Recommended</em></span>
+                <span>Strong coverage without catalog sprawl.</span>
+              </label>
+              <label class="posture-card">
+                <input type="radio" name="posture" value="comprehensive">
+                <span class="posture-title">Comprehensive</span>
+                <span>Broader specialist coverage for complex plans.</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="submit-row">
+            <div class="privacy-note">
+              <strong>Private by design</strong>
+              Analysis runs locally and makes no external request.
+            </div>
+            <button class="button primary" id="analyze-button" type="submit">
+              Build recommendation <span>→</span>
+            </button>
+          </div>
+          <div id="form-error" class="error-message" role="alert" hidden></div>
+        </form>
+
+        <aside class="panel methodology-panel">
+          <span class="step-number">How it works</span>
+          <h2>Evidence, not a mystery score.</h2>
+          <ol class="method-list">
+            <li><span>1</span><div><strong>Interpret intent</strong><p>Extract planned capabilities and their importance.</p></div></li>
+            <li><span>2</span><div><strong>Score project fit</strong><p>Compare coverage, stack compatibility, uniqueness and health.</p></div></li>
+            <li><span>3</span><div><strong>Expose tradeoffs</strong><p>Show why each skill is included, deferred or excluded.</p></div></li>
+            <li><span>4</span><div><strong>Verify later</strong><p>Connect the local Claude runner for measured trigger evidence.</p></div></li>
+          </ol>
+          <div class="notice-card">
+            <strong>Honest evidence labels</strong>
+            <p>This MVP reports planning estimates. It will never present inferred fit as a measured Claude benchmark.</p>
+          </div>
+        </aside>
+      </section>
+
+      <section id="results" class="results" hidden>
+        <div class="results-heading">
+          <div>
+            <div class="eyebrow">Recommendation ready</div>
+            <h2 id="result-title">Balanced catalog</h2>
+            <p id="evidence-notice"></p>
+          </div>
+          <div class="export-actions">
+            <a class="button secondary" id="export-json" href="#">Export JSON</a>
+            <a class="button secondary" id="export-markdown" href="#">Export Markdown</a>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <article><span id="selected-count">0</span><small>skills selected</small></article>
+          <article><span id="coverage">0%</span><small>weighted coverage</small></article>
+          <article><span id="capability-count">0</span><small>capabilities detected</small></article>
+          <article><span id="gap-count">0</span><small>coverage gaps</small></article>
+        </div>
+
+        <div class="result-grid">
+          <section class="panel capability-panel">
+            <div class="section-title">
+              <div><span class="step-number">Detected intent</span><h3>Project capabilities</h3></div>
+              <button class="text-button" id="recalculate" type="button">Recalculate with weights</button>
+            </div>
+            <div id="capabilities" class="capability-list"></div>
+            <div id="gaps" class="gap-box" hidden></div>
+          </section>
+
+          <section class="panel ranking-panel">
+            <div class="section-title">
+              <div><span class="step-number">Ranked catalog</span><h3>Skills by project importance</h3></div>
+              <button class="text-button" id="show-all" type="button">Show all candidates</button>
+            </div>
+            <div class="ranking-header" aria-hidden="true">
+              <span>Rank and skill</span><span>Tier</span><span>Importance</span>
+            </div>
+            <div id="recommendations" class="recommendation-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>SkillScope 0.1 · planning recommendation MVP</span>
+      <span>Local data stays local unless you explicitly choose otherwise.</span>
+    </footer>
+
+    <dialog id="privacy-dialog">
+      <form method="dialog" class="dialog-shell">
+        <div class="dialog-header">
+          <div><span class="eyebrow">Your data, your choice</span><h2>Privacy center</h2></div>
+          <button class="icon-button" value="cancel" aria-label="Close privacy center">×</button>
+        </div>
+
+        <div class="privacy-banner">
+          <span class="shield">◇</span>
+          <div><strong>Manual-only by default</strong><p>Nothing is monitored, uploaded, or changed unless you separately enable it.</p></div>
+        </div>
+
+        <label class="setting-block">
+          <span><strong>Monitoring mode</strong><small>Monitoring preferences are saved; no background watcher is installed in this MVP.</small></span>
+          <select id="monitoring-mode">
+            <option value="manual">Manual only</option>
+            <option value="local">Local monitoring</option>
+            <option value="scheduled">Scheduled local monitoring</option>
+          </select>
+        </label>
+
+        <div class="setting-block scopes" id="scope-settings" hidden>
+          <span><strong>Permitted monitoring scope</strong><small>Choose each category explicitly.</small></span>
+          <div class="scope-grid">
+            <label><input type="checkbox" value="planning"> PRD and architecture</label>
+            <label><input type="checkbox" value="dependencies"> Dependencies and lockfiles</label>
+            <label><input type="checkbox" value="skills"> Claude skills</label>
+            <label><input type="checkbox" value="settings"> Claude project settings</label>
+          </div>
+        </div>
+
+        <label class="toggle-row">
+          <span><strong>Cloud synchronization</strong><small>Allow sanitized reports to leave this computer.</small></span>
+          <input id="cloud-sync" type="checkbox" role="switch">
+        </label>
+        <label class="toggle-row">
+          <span><strong>Anonymous telemetry</strong><small>Share aggregate product usage without project contents.</small></span>
+          <input id="telemetry" type="checkbox" role="switch">
+        </label>
+        <label class="toggle-row">
+          <span><strong>Automatic paid analysis</strong><small>Allow future benchmark adapters to spend API budget automatically.</small></span>
+          <input id="automatic-spend" type="checkbox" role="switch">
+        </label>
+        <label class="toggle-row">
+          <span><strong>Automatic configuration changes</strong><small>Apply skill changes without a separate file-diff confirmation.</small></span>
+          <input id="automatic-changes" type="checkbox" role="switch">
+        </label>
+
+        <div class="local-data-row">
+          <div><strong>Local data</strong><small id="local-data-summary">Loading…</small></div>
+          <div>
+            <a class="text-button" href="/api/local-data/export" download="skillscope-data.json">Export</a>
+            <button class="text-button danger" id="delete-data" type="button">Delete all</button>
+          </div>
+        </div>
+
+        <div class="dialog-actions">
+          <span id="privacy-status" class="muted"></span>
+          <button class="button primary" id="save-privacy" type="button">Save choices</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

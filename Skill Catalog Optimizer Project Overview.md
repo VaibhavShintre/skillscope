@@ -4,9 +4,13 @@ Sep 26, 2026 · @Vaibhav Shintre
 
 ## What we are building
 
-A command-line tool (working name **skillscope**, Apache-2.0) that points at a repository, takes the skills already installed for Claude Code plus any candidates, and reports which skills fire on that project's real tasks, which ones steal triggers from others, and which ones should be kept, demoted to name-only, or removed. v0 is the shadowing meter only: one command, Claude Code only, static checks plus trigger measurement, no outcome evals, no security scanning beyond a pluggable hook.
+**Product direction update (Sep 29, 2026).** SkillScope now has a greenfield entry point as well as the repository audit described below. A developer can start with a project description, PRD, technical specification, and intended stack before a repository exists. The privacy-first local web MVP extracts capabilities, ranks a transparent demonstration catalog, explains every recommendation, supports lean/balanced/comprehensive postures, and keeps monitoring and data-sharing choices off by default. Its results are explicitly labelled planning estimates. The runner spike remains the verification layer that will replace inferred routing confidence with measured Claude trigger evidence once a project or synthetic planning workspace is available.
 
-The v0 promise: `skillscope scan .` runs in under 15 minutes on a laptop, costs under $2 in API calls on Haiku, and ends with a verdict table plus a `skillOverrides` block you can paste into `.claude/settings.local.json`.
+The intended lifecycle is: plan a starter catalog from project intent, verify trigger behavior locally, and optionally audit changes as the repository evolves. Continuous monitoring, cloud synchronization, telemetry, paid automatic analysis, and automatic configuration changes are independent opt-in controls; none is required to use the product.
+
+The verification engine is an Apache-2.0 command-line tool that points at a repository or synthetic planning workspace, takes installed and candidate Claude Code skills, and reports which skills are selected for real project tasks, which ones steal triggers from others, and which ones should be kept, demoted to name-only, or removed. Its first runner milestone is the shadowing meter: Claude Code only, static checks plus trigger measurement, no outcome evals, and no security scanning beyond a pluggable hook.
+
+The runner promise remains: `skillscope scan .` runs in under 15 minutes on a laptop, costs under $2 in API calls on Haiku, and ends with a verdict table plus a `skillOverrides` block you can paste into `.claude/settings.local.json`.
 
 Why this first: the shadowing paper (arXiv 2605.24050) attributes up to a 21 point pass-rate drop to wrong-skill selection as libraries grow, `claude plugin eval` already covers with/without outcome testing for one plugin, and no tool today measures a whole catalog against a specific project. Trigger checks cost one short turn each, so this is the one tier that can run on every project for cents.
 
@@ -125,7 +129,7 @@ Every run writes a folder `.skillscope/runs/<timestamp>/` containing one JSON ar
 | `static.json` | per skill: `lint[]`, `budget{listed_chars, evicted_at_model}`, `overlap[]` (other skill, score), `version_flags[]` (library, skill says, lockfile has), `security{block, findings[]}` | Static gate | Trigger runner (to drop blocked skills), recommender, reporter |
 | `prompts.json` | per prompt: `id`, `text`, `expected` (skill id or `none`), `origin` (commit, issue, user, control), `domain` | Prompt generator | Trigger runner, analyzer |
 | `run_plan.json` | list of configurations, each a set of skill ids plus overrides; `repeats`; `model`; `cost_cap_usd` | Trigger runner (planning step) | Trigger runner |
-| `events.jsonl` | per (config, prompt, repeat): `skills_invoked[]` in order, `first_skill`, `turns`, `input_tokens`, `output_tokens`, `cost_usd`, `duration_ms`, `error` | Trigger runner | Analyzer |
+| `events.jsonl` | per (config, prompt, repeat): `selected_skill`, `skill_load_succeeded`, `skills_selected[]`, `turns`, tokens, cost, duration, exact versions, termination reason, error | Trigger runner | Analyzer |
 | `analysis.json` | per skill: `precision`, `recall`, `control_fire_rate`, `n`, `p_value`; `shadowing[]` edges (from, to, recall\_delta, p\_value); `budget_evictions[]` | Analyzer | Recommender, reporter |
 | `verdicts.json` | per skill: `verdict` (keep, name-only, remove, unverified), `reasons[]` with pointers into analysis and static, `confidence` | Recommender | Reporter, apply |
 | `skillOverrides.json` | the exact object to merge into `.claude/settings.local.json` | Recommender | Apply |
@@ -184,6 +188,8 @@ The `runner/session.py` wrapper is the only file that knows how Claude Code is i
 
 Iteration 1 (weeks 1 to 2) builds only the path from a hand-written prompt file to a fire-count table, so the week 2 gate can be judged on real numbers. No profiler, no registry, no prompt generation, no analysis beyond counts.
 
+The runner plan was revised on Sep 29 after implementation-readiness review. The revised plan and design are authoritative for Iteration 1. The important corrections are: Linux/WSL2 execution for reliable process-tree cleanup; probed rather than assumed skill-loading isolation; canonical skill identities; sterile workspaces and unique Claude configuration per session; immutable run manifests; seeded configuration interleaving; selection-versus-load semantics; reserved-cost accounting; and an eligibility-checked paired gate.
+
 &#91;embedded content: iteration 1 · runner spike: planner, pool, one session lane, store, fire counts\]
 
 The top row turns inputs into a list of sessions; the dashed lane is the code that runs once per session; the store and the fire-count table close the loop. The dashed `fake_claude` box stands in for the real binary in tests so the parser and the store are exercised without spending money.
@@ -192,25 +198,26 @@ The top row turns inputs into a list of sessions; the dashed lane is the code th
 
 | Box | File | Signature or contract |
 | --- | --- | --- |
-| Inputs | `prompts.yaml`, a skills directory | Each prompt: `id`, `text`, `expected` (skill name or `none`). The skills directory is a plain folder of SKILL.md subfolders, copied as given |
-| skillscope scan | `cli.py` | `scan REPO -p prompts.yaml -s SKILLS_DIR [-j 4] [-r 1] [-m haiku] [-n]` where `-n` prints the plan and estimated cost |
-| Planner | `runner/plan.py` | `plan(prompts, configs, repeats) -> list[Session]`; configs in iteration 1 are exactly two: `full` and `minimal` (the 5 skills the prompts expect) |
-| Pool | `runner/pool.py` | `run_all(sessions, parallel=4, cost_cap_usd) -> AsyncIterator[SessionRecord]`; a semaphore bounds concurrency; the cap is checked against the running sum of `cost_usd` before each start |
-| Workspace builder | `runner/workspace.py` | `build(repo, config) -> Path`: copies the repo to a temp dir without `.git` and `node_modules`, writes the config's skills to `.claude/skills/`, writes a `.claude/settings.local.json` that allows only Read, Grep, Glob, LS |
-| claude -p subprocess | `runner/session.py` | `run(workspace, prompt, model, max_turns=3) -> AsyncIterator[str]`: starts `claude -p` with stream-json output, verbose, project setting sources only, the turn cap, and the tool allowlist; yields raw NDJSON lines; kills the process on timeout (120 s) |
-| Stream parser | `runner/stream.py` | `parse(lines) -> Iterator[Event]`; recognises three event kinds: `init` (system start), `tool_use` (any assistant content block with `type: tool_use`; a block whose `name` is `Skill` is a skill invocation and its `input` names the skill), `result` (cost, duration, turn count). Unknown lines are kept as `raw` events, never dropped |
+| Inputs | `prompts.yaml`, `configs.yaml`, skills directory, pinned repo | Preflight validates safe IDs, task/control semantics, effective SKILL names, invocability, ordered 5/15/30 catalogs, content hashes and external symlinks |
+| skillscope scan | `cli.py` | `scan REPO -p prompts.yaml -s SKILLS_DIR -c configs.yaml [-j 4] [-r 3] [--model FULL_ID] [--seed N] [-n]`; dry-run performs all validation and cost planning without API use |
+| Manifest | `manifest.py` | Atomically records repository/input/skill hashes, resolved catalogs, exact versions/options, seed and planned keys; resume refuses any mismatch |
+| Planner | `runner/plan.py` | Builds a seeded, reproducibly interleaved list over `minimal`, `medium`, and `full`, then filters completed keys without perturbing remaining order |
+| Pool | `runner/pool.py` | Bounds concurrency and reserves the per-session budget before launch so parallel workers respect a hard launch cap |
+| Workspace builder | `runner/workspace.py` | Produces one sterile read-only repo copy per config, removes pre-existing project skills/customization according to the probed policy, and installs exactly the resolved ordered catalog |
+| claude -p subprocess | `runner/session.py` | Uses the day-zero-probed invocation, an explicit model ID, one unique `CLAUDE_CONFIG_DIR` per session, stream JSON, tool restrictions, turn/budget/time backstops, and POSIX process-group cleanup |
+| Stream parser | `runner/stream.py` | Parses init, assistant/tool-use, user tool-result and final result events; unknown or malformed lines remain raw |
 | fake\_claude | `tests/fake_claude/claude` | A script on PATH that looks up the prompt text in `tests/fixtures/streams/index.json` and cats the matching recorded transcript; unknown prompts return a fixed no-skill transcript |
-| Session record | `models.py` | `SessionRecord(config, prompt_id, repeat, skills_invoked: list[str], first_skill, turns, input_tokens, output_tokens, cost_usd, duration_ms, error)` |
-| Store | `store.py` | `append(record)`: one line to `events.jsonl` and one row to SQLite in the same call, fsync after each; `scan` skips sessions whose (config, prompt\_id, repeat) already exist |
-| Fire-count table | `report/terminal.py` | Rows are skills, columns are configs, cells are `fired / expected` counts plus fires on prompts that expected `none` |
+| Session record | `models.py` | Separates `selected_skill` from `skill_load_succeeded`, and records canonical expectations, exact versions, catalog count, cost source and termination reason |
+| Store | `store.py` | Appends and fsyncs one validated JSONL record; rejects duplicate keys and only recovers a torn final line |
+| Reporter and gate | `report/` | Shows selection counts, config/control rates, technical failures and eligibility; evaluates a paired prompt-level effect and deterministic prompt-cluster bootstrap interval |
 
 **Order of work**
 
-1. Record 5 real transcripts by hand (one per event kind plus two edge cases: a session with no Skill call, a session that hits the turn cap) and check them into `tests/fixtures/streams/`.
-2. Write the parser against those fixtures; unit test it before touching subprocesses.
-3. Write `session.py` and `workspace.py`; integration test with `fake_claude` on PATH.
-4. Write the planner, pool and store; run 4 sessions in parallel against `fake_claude`, kill one midway, confirm resume works.
-5. Install 30 popular skills into one real repo, write 40 prompts by hand, run `full` and `minimal`, and read the table. This is the week 2 gate.
+1. Establish the Linux/WSL2 toolchain and run a three-mode Claude compatibility probe; record the exact successful skill-loading contract.
+2. Build strict models, canonical-skill preflight, manifest/resume guard, parser and selection/load state machine against recorded fixtures.
+3. Build the fake Claude harness, POSIX process controller, sterile workspaces and unique per-session Claude configuration; prove descendant cleanup.
+4. Build seeded interleaving, reserved-cost pooling, JSONL persistence, interrupt/resume, reporting and automated eligibility/gate evaluation.
+5. Assemble and review the pinned repo, 30 licensed skills and 40 prompts, then run the 5/15/30 catalog gate only after the user checkpoint.
 
 **Field names to confirm on day 1.** The exact JSON keys in Claude Code's stream output (the `Skill` tool's `input` field, the `result` event's cost and turn fields) must be read off a recorded transcript from the pinned Claude Code version, not from memory. The parser's fixtures are the source of truth for those names.
 
