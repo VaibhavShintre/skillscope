@@ -25,9 +25,10 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         "| --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for item in recommendation.verdicts:
+        delta = "n/a" if item.leave_one_out_delta is None else f"{item.leave_one_out_delta:+.1%}"
         lines.append(
             f"| {item.name} | {item.verdict} | {item.precision:.1%} | {item.recall:.1%} | "
-            f"{item.singleton_score:.1%} | {item.leave_one_out_delta:+.1%} |"
+            f"{item.singleton_score:.1%} | {delta} |"
         )
     lines.extend(["", "## Limitations", ""])
     lines.extend(f"- {item}" for item in recommendation.limitations)
