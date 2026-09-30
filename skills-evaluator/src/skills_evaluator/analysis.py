@@ -21,6 +21,10 @@ from skills_evaluator.models import (
 _UNKNOWN = Label(UNLABELED, frozenset(), "heuristic")
 # Scores are ratios of small counts; compare them with a little slack.
 EPSILON = 1e-9
+# The smallest leave-one-out change that can make a skill "essential", and the recall below
+# which a skill in the recommended bundle is only "marginal".
+ESSENTIAL_DELTA = 0.05
+MARGINAL_RECALL = 0.5
 
 
 def _correct(result: SessionResult, label: Label) -> bool | None:
@@ -115,6 +119,14 @@ def analyze(
         recommended = plan.configurations[0]
 
     selected_ids = set(recommended.skill_ids) if recommended else set()
+
+    def meaningful(delta: float | None) -> bool:
+        """A leave-one-out change larger than the noise floor and the essential threshold."""
+        return (
+            delta is not None
+            and delta > effective_tolerance + EPSILON
+            and delta >= ESSENTIAL_DELTA - EPSILON
+        )
     verdicts: list[SkillVerdict] = []
     for skill in plan.candidates:
         # Precision is per configuration: what fraction of labeled activations in that
@@ -176,18 +188,36 @@ def analyze(
                 f"Insufficient labeled evidence: {labeling.unlabeled_prompts} of "
                 f"{len(plan.prompts)} prompts are unlabeled."
             )
+        elif skill.id in selected_ids and recall is not None and recall < MARGINAL_RECALL:
+            # Its score share cannot be credited to its own activations: with most of the
+            # prompts scored as negatives, a skill that rarely fires costs nothing, and a bundle
+            # can score well because another skill fires less when more skills are listed.
+            verdict = "marginal"
+            reasons.append(
+                f"In the recommended bundle, but it fired on only {recall:.0%} of the prompts "
+                "that expected it, so the bundle's score may owe more to other skills firing "
+                "less than to this one."
+            )
         elif skill.id in selected_ids and delta is None:
             verdict = "unverified"
             reasons.append(
                 "The full bundle without this skill was not measured, so its marginal "
                 "value is unknown."
             )
-        elif skill.id in selected_ids and delta >= 0.05:
+        elif skill.id in selected_ids and meaningful(delta):
             verdict = "essential"
             reasons.append(f"Removing it reduced the full-bundle score by {delta:.1%}.")
         elif skill.id in selected_ids:
             verdict = "useful"
             reasons.append("Included in the smallest bundle within the score tolerance.")
+        elif meaningful(delta):
+            # Evidence conflicts: dropping it from the full bundle cost more than the noise
+            # floor, yet a smaller bundle without it scored within noise of the best one.
+            verdict = "contested"
+            reasons.append(
+                f"Removing it from the full bundle cost {delta:.1%}, but a smaller bundle "
+                "without it scored within the noise floor of the best, so the evidence conflicts."
+            )
         elif recall is None:
             verdict = "unverified"
             reasons.append("No labeled prompt expected this skill, so its routing is unmeasured.")
@@ -203,9 +233,18 @@ def analyze(
                 "No bundle beat the no-skill baseline beyond the noise floor, so this skill "
                 "has not been shown to add lift."
             )
+        elif delta is None:
+            verdict = "unverified"
+            reasons.append(
+                "The full bundle without this skill was not measured, so it cannot be called "
+                "redundant."
+            )
         else:
             verdict = "redundant"
-            reasons.append("It showed value but was unnecessary in the smallest near-best bundle.")
+            reasons.append(
+                f"Removing it from the full bundle changed the score by {delta:+.1%}, within "
+                "the noise floor, and the smallest near-best bundle does not need it."
+            )
         verdicts.append(
             SkillVerdict(
                 skill_id=skill.id,
@@ -255,6 +294,13 @@ def analyze(
             + ", ".join(labeling.uncategorized_skills)
             + f"); {labeling.unjudged_activations} of their activations there were ignored. "
             "Add a `category:` field to their SKILL.md frontmatter."
+        )
+    marginal = [item.name for item in verdicts if item.verdict == "marginal"]
+    if marginal:
+        limitations.append(
+            "Marginal skills in the recommended bundle (" + ", ".join(marginal) + ") fired on "
+            f"under {MARGINAL_RECALL:.0%} of the prompts that expected them; the bundle's score "
+            "may come from other skills firing less rather than from their own activations."
         )
     if insufficient:
         limitations.insert(

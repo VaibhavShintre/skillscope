@@ -93,6 +93,13 @@ actual system prompt, tool definitions, prompt and skill text, and the harness's
 estimated from characters, so both are estimates. The final report shows expected, actual and the
 bound side by side.
 
+Configurations are planned in priority order. The baseline, every singleton, the full bundle
+and every leave-one-out (the full bundle minus one skill) come first and are never cut to save
+budget, so every skill gets a measured leave-one-out. Greedy prefixes and pairs are extras that
+fill what is left. If the required set does not fit the caps, the planner drops auto-discovered
+skills (lowest relevance first) and says which; skills you name with `--skill` are never dropped,
+so too small a cap is an error instead.
+
 A run scores each configuration on a handful of prompts, so one prompt is a large step (for
 example 6.7 points on 15 prompts). The tolerance used to compare the baseline and the bundles is
 therefore never smaller than one prompt: a one-prompt lead over "no skills" is reported as
