@@ -24,16 +24,21 @@ def _correct(result: SessionResult, label: Label) -> bool | None:
     """True/False for labeled prompts; None when the prompt is unlabeled (excluded)."""
     if label.kind == UNLABELED:
         return None
-    fired = set(result.selected_skills)
+    # Skills the label cannot judge are ignored: what they do here is neither right nor wrong.
+    fired = set(result.selected_skills) - label.unknown
     if label.kind == NEGATIVE:
         return not fired
-    # Positive: something fired, and everything that fired was an expected skill.
-    return bool(fired) and fired <= label.expected
+    # Positive: an expected skill fired, and everything judged that fired was expected.
+    return bool(fired & label.expected) and fired <= label.expected
 
 
 def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02) -> Recommendation:
     completed = [item for item in results if item.outcome == "completed"]
     labels = {prompt.id: resolve_label(prompt, plan.candidates) for prompt in plan.prompts}
+    labeling = summarize_labels(plan.prompts, plan.candidates)
+    # With most prompts unlabeled, any score describes a minority of the prompts; say so
+    # instead of recommending.
+    insufficient = bool(plan.prompts) and labeling.unlabeled_prompts * 2 > len(plan.prompts)
     # (result, label, correct) for labeled sessions only; unlabeled ones are counted, not scored.
     judged: dict[str, list[tuple[SessionResult, Label, bool]]] = defaultdict(list)
     unlabeled_sessions = 0
@@ -71,12 +76,15 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
     baseline_score = scores.get(baseline.id) if baseline else None
     # If no bundle beats having no skills (within tolerance), the honest answer is "no skills".
     no_skills_wins = (
-        baseline is not None
+        not insufficient
+        and baseline is not None
         and baseline_score is not None
         and best_score is not None
         and baseline_score >= best_score - tolerance
     )
-    if no_skills_wins:
+    if insufficient:
+        recommended = None
+    elif no_skills_wins:
         recommended = baseline
     elif eligible:
         recommended = min(
@@ -85,7 +93,7 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
     else:
         recommended = plan.configurations[0]
 
-    selected_ids = set(recommended.skill_ids)
+    selected_ids = set(recommended.skill_ids) if recommended else set()
     verdicts: list[SkillVerdict] = []
     for skill in plan.candidates:
         # Precision is per configuration: what fraction of labeled activations in that
@@ -98,7 +106,7 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
             fired = [
                 label
                 for result, label, _ in judged[config.id]
-                if skill.id in result.selected_skills
+                if skill.id in result.selected_skills and skill.id not in label.unknown
             ]
             precision_by_config[config.id] = (
                 sum(skill.id in label.expected for label in fired) / len(fired) if fired else None
@@ -141,6 +149,12 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         if skill.blocked:
             verdict = "unsafe"
             reasons.append("Blocked by the static safety gate.")
+        elif insufficient:
+            verdict = "unverified"
+            reasons.append(
+                f"Insufficient labeled evidence: {labeling.unlabeled_prompts} of "
+                f"{len(plan.prompts)} prompts are unlabeled."
+            )
         elif skill.id in selected_ids and delta is None:
             verdict = "unverified"
             reasons.append(
@@ -173,21 +187,33 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
                 skill_id=skill.id,
                 name=skill.name,
                 verdict=verdict,
-                precision=None if precision is None else round(precision, 4),
+                auto_discovered=not skill.user_requested,
+                # Every per-skill number describes a minority of the prompts when the
+                # evidence is insufficient, so all of them are withheld.
+                precision=None if precision is None or insufficient else round(precision, 4),
                 precision_by_config={
                     key: None if value is None else round(value, 4)
                     for key, value in precision_by_config.items()
+                    if not insufficient
                 },
-                recall=None if recall is None else round(recall, 4),
-                singleton_score=None if singleton is None else round(singleton, 4),
-                leave_one_out_delta=None if delta is None else round(delta, 4),
+                recall=None if recall is None or insufficient else round(recall, 4),
+                singleton_score=(
+                    None if singleton is None or insufficient else round(singleton, 4)
+                ),
+                leave_one_out_delta=(
+                    None if delta is None or insufficient else round(delta, 4)
+                ),
                 selected=skill.id in selected_ids,
                 reasons=reasons,
             )
         )
 
-    labeling = summarize_labels(plan.prompts, plan.candidates)
     labeling.unlabeled_sessions = unlabeled_sessions
+    labeling.unjudged_activations = sum(
+        len(set(result.selected_skills) & label.unknown)
+        for entries in judged.values()
+        for result, label, _ in entries
+    )
     limitations = [
         "This run measures routing in the Skills Evaluator API harness, not native Claude Code.",
         "Candidate scripts were inventoried but not executed.",
@@ -201,11 +227,19 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         )
     if labeling.uncategorized_skills:
         limitations.append(
-            "Skills without a category disable the capability heuristic for every prompt: "
+            "Skills without a category are not judged on capability-derived prompts ("
             + ", ".join(labeling.uncategorized_skills)
-            + ". Add a `category:` field to their SKILL.md frontmatter."
+            + f"); {labeling.unjudged_activations} of their activations there were ignored. "
+            "Add a `category:` field to their SKILL.md frontmatter."
         )
-    if best_score is None:
+    if insufficient:
+        limitations.insert(
+            0,
+            f"Insufficient labeled evidence: {labeling.unlabeled_prompts} of "
+            f"{len(plan.prompts)} prompts are unlabeled (more than half), so no recommendation "
+            "is issued.",
+        )
+    if best_score is None and not insufficient:
         limitations.append("No labeled sessions were scored, so no bundle could be recommended.")
     scored = [len(entries) for entries in judged.values() if entries]
     scored_per_config = min(scored, default=0)
@@ -215,16 +249,20 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
             f"(1 prompt = {100 / scored_per_config:.1f} points), so score differences smaller "
             "than that are not statistically significant."
         )
-    recommended_score = scores.get(recommended.id)
+    recommended_score = scores.get(recommended.id) if recommended else None
+    headline = None if insufficient else best_score
     return Recommendation(
         run_id=plan.run_id,
-        recommended_config=recommended.id,
-        recommended_skill_ids=recommended.skill_ids,
-        recommended_count=len(recommended.skill_ids),
-        best_score=None if best_score is None else round(best_score, 4),
+        recommended_config=recommended.id if recommended else "",
+        recommended_skill_ids=recommended.skill_ids if recommended else [],
+        recommended_count=len(recommended.skill_ids) if recommended else 0,
+        best_score=None if headline is None else round(headline, 4),
         recommended_score=None if recommended_score is None else round(recommended_score, 4),
         no_skills_recommended=no_skills_wins,
-        baseline_score=None if baseline_score is None else round(baseline_score, 4),
+        insufficient_evidence=insufficient,
+        baseline_score=(
+            None if baseline_score is None or insufficient else round(baseline_score, 4)
+        ),
         scored_prompts_per_config=scored_per_config,
         tolerance=tolerance,
         total_cost_usd=round(sum(item.cost_usd for item in results), 6),

@@ -4,7 +4,12 @@ import pytest
 
 from skills_evaluator.analysis import analyze
 from skills_evaluator.engine import FakeEngine
-from skills_evaluator.labels import resolve_label, summarize_labels
+from skills_evaluator.labels import (
+    SKILL_CATEGORIES_BY_NAME,
+    resolve_label,
+    skill_categories,
+    summarize_labels,
+)
 from skills_evaluator.models import EvalPrompt, SessionResult, SkillCandidate
 from skills_evaluator.planner import build_plan
 from skills_evaluator.profiler import profile_project
@@ -68,18 +73,48 @@ def test_capability_heuristic_labels_by_category_not_description() -> None:
     assert resolve_label(_project_prompt("frontend"), [misleading]).kind == "negative"
 
 
-def test_one_uncategorized_skill_makes_heuristic_labels_unlabeled() -> None:
-    candidates = [_skill("frontend-design"), _skill("mystery-helper")]
-    assert resolve_label(_project_prompt("frontend"), candidates).kind == "unlabeled"
-    assert resolve_label(_project_prompt("database"), candidates).kind == "unlabeled"
-    # Rules that don't depend on categories still apply.
+def test_uncategorized_skill_only_loses_its_own_label() -> None:
+    frontend = _skill("frontend-design")
+    mystery = _skill("mystery-helper")
+    candidates = [frontend, mystery]
+
+    ui = resolve_label(_project_prompt("frontend"), candidates)
+    assert (ui.kind, ui.expected, ui.unknown) == ("positive", {frontend.id}, {mystery.id})
+    # No categorized skill covers databases: negative for them, and still not judged for mystery.
+    database = resolve_label(_project_prompt("database"), candidates)
+    assert (database.kind, database.expected, database.unknown) == (
+        "negative",
+        frozenset(),
+        {mystery.id},
+    )
+    # Rules that don't depend on categories judge every skill.
     control = EvalPrompt(id="c", text="x", origin="control")
-    assert resolve_label(control, candidates).kind == "negative"
+    assert resolve_label(control, candidates).unknown == frozenset()
+    # An unmapped capability is still unlabeled, and so is a set of only-uncategorized skills.
+    assert resolve_label(_project_prompt("accessibility"), candidates).kind == "unlabeled"
+    assert resolve_label(_project_prompt("frontend"), [mystery]).kind == "unlabeled"
 
     summary = summarize_labels([_project_prompt("frontend"), control], candidates)
-    assert summary.unlabeled_prompts == 1
-    assert summary.unlabeled_prompt_ids == ["project-frontend"]
+    assert summary.unlabeled_prompts == 0
     assert summary.uncategorized_skills == ["mystery-helper"]
+
+
+def test_a_stored_heuristic_label_is_derived_again() -> None:
+    # Runs planned with the old rules stamped "unlabeled" whenever any skill lacked a category.
+    stale = EvalPrompt(
+        id="p",
+        text="x",
+        origin="project",
+        capability="frontend",
+        label="unlabeled",
+        label_source="heuristic",
+    )
+    frontend = _skill("frontend-design")
+    label = resolve_label(stale, [frontend, _skill("mystery-helper")])
+    assert (label.kind, label.expected) == ("positive", {frontend.id})
+    # A label the user wrote is never re-derived.
+    mine = stale.model_copy(update={"label_source": "user"})
+    assert resolve_label(mine, [frontend]).kind == "unlabeled"
 
 
 def test_skill_frontmatter_category_is_parsed(tmp_path: Path) -> None:
@@ -204,3 +239,53 @@ def test_ideal_engine_scores_perfectly_and_over_selecting_engine_does_not(tmp_pa
     # Firing on every prompt means most activations are false positives.
     assert all(item.precision is not None and item.precision < 0.5 for item in noisy.verdicts)
     assert not any(item.verdict == "essential" for item in noisy.verdicts)
+
+
+ANTHROPIC_CATALOG = [
+    "academy-guide",
+    "algorithmic-art",
+    "brand-guidelines",
+    "canvas-design",
+    "claude-api",
+    "discernment-nudge",
+    "doc-coauthoring",
+    "docx",
+    "frontend-design",
+    "internal-comms",
+    "mcp-builder",
+    "pdf",
+    "pptx",
+    "skill-creator",
+    "slack-gif-creator",
+    "theme-factory",
+    "web-artifacts-builder",
+    "webapp-testing",
+    "xlsx",
+]
+
+
+def test_every_anthropic_catalog_skill_has_a_category() -> None:
+    assert len(ANTHROPIC_CATALOG) == 19
+    for name in ANTHROPIC_CATALOG:
+        assert SKILL_CATEGORIES_BY_NAME.get(name), f"{name} has no category"
+        assert skill_categories(_skill(name)), f"{name} is not resolved from the registry"
+    # Frontmatter still wins over the registry.
+    assert skill_categories(_skill("pdf", categories=["docs"])) == {"docs"}
+
+
+def test_categorized_catalog_skills_are_judged_not_ignored() -> None:
+    artifacts = _skill("web-artifacts-builder")
+    testing = _skill("webapp-testing")
+    pdf = _skill("pdf")
+    candidates = [artifacts, testing, pdf]
+
+    ui = resolve_label(_project_prompt("frontend"), candidates)
+    assert (ui.kind, ui.expected, ui.unknown) == ("positive", {artifacts.id}, frozenset())
+    # A PDF skill has no capability to match, so on a database prompt it should stay quiet.
+    database = resolve_label(_project_prompt("database"), candidates)
+    assert (database.kind, database.expected, database.unknown) == (
+        "negative",
+        frozenset(),
+        frozenset(),
+    )
+    assert summarize_labels([_project_prompt("frontend")], candidates).uncategorized_skills == []

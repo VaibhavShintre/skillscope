@@ -120,12 +120,16 @@ class LabelSummary(BaseModel):
     unlabeled_prompt_ids: list[str] = Field(default_factory=list)
     unlabeled_sessions: int = 0
     uncategorized_skills: list[str] = Field(default_factory=list)
+    # Activations of uncategorized skills on capability-derived prompts: neither right nor wrong.
+    unjudged_activations: int = 0
 
 
 class SkillVerdict(BaseModel):
     skill_id: str
     name: str
     verdict: str
+    # True for skills the planner added from the public catalog, not passed with --skill.
+    auto_discovered: bool = False
     # Precision is measured in the full bundle; None when no labeled prompt activated it.
     precision: float | None = None
     precision_by_config: dict[str, float | None] = Field(default_factory=dict)
@@ -151,6 +155,8 @@ class Recommendation(BaseModel):
     labeling: LabelSummary = Field(default_factory=LabelSummary)
     # True when the no-skill baseline scored at least as well as the best bundle.
     no_skills_recommended: bool = False
+    # True when more than half the prompts are unlabeled: no recommendation is issued.
+    insufficient_evidence: bool = False
     baseline_score: float | None = None
     scored_prompts_per_config: int = 0
     limitations: list[str]

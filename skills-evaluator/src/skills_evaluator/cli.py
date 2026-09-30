@@ -78,11 +78,15 @@ def _print_plan(plan, run_dir: Path) -> None:
     typer.echo(f"Artifacts:        {run_dir.resolve()}")
     for candidate in plan.candidates:
         label = "BLOCKED" if candidate.blocked else f"fit {candidate.relevance:.0%}"
-        typer.echo(f"  - {candidate.name}: {label} ({candidate.source})")
+        origin = "" if candidate.user_requested else ", auto-discovered"
+        typer.echo(f"  - {candidate.name}: {label} ({candidate.source}{origin})")
 
 
 def _echo_recommendation(recommendation: Recommendation, run_dir: Path) -> None:
-    typer.echo(f"Recommended skills: {recommendation.recommended_count}")
+    if recommendation.insufficient_evidence:
+        typer.echo("Insufficient labeled evidence: no recommendation issued. See the report.")
+    else:
+        typer.echo(f"Recommended skills: {recommendation.recommended_count}")
     if recommendation.no_skills_recommended:
         typer.echo("No skills recommended: the no-skill baseline scored as well as any bundle.")
     typer.echo(f"Report: {(run_dir / 'report.html').resolve()}")
@@ -266,6 +270,8 @@ def install(
     recommendation = Recommendation.model_validate_json(
         (run_dir / "recommendation.json").read_text(encoding="utf-8")
     )
+    if recommendation.insufficient_evidence:
+        raise typer.BadParameter("This run has insufficient labeled evidence; nothing to install.")
     by_id = {item.id: item for item in plan.candidates}
     target_root = project.resolve() / ".claude" / "skills"
     for skill_id in recommendation.recommended_skill_ids:
