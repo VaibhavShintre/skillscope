@@ -37,6 +37,18 @@ def append_result(run_dir: Path, result: SessionResult) -> None:
         os.fsync(handle.fileno())
 
 
-def session_order(run_dir: Path) -> list[tuple[str, str]]:
+def session_key(config_id: str, prompt_id: str, repeat: int = 0) -> str:
+    """The first run of a cell keeps the plain key, so older runs and one-repeat runs match."""
+    base = f"{config_id}::{prompt_id}"
+    return base if repeat == 0 else f"{base}::r{repeat}"
+
+
+def session_schedule(run_dir: Path) -> list[tuple[str, str, int]]:
+    """Every planned session as (configuration, prompt, repeat), in the order to run them."""
     raw = json.loads((run_dir / "session-order.json").read_text(encoding="utf-8"))
-    return [(str(config), str(prompt)) for config, prompt in raw]
+    return [(str(item[0]), str(item[1]), int(item[2]) if len(item) > 2 else 0) for item in raw]
+
+
+def session_order(run_dir: Path) -> list[tuple[str, str]]:
+    """The (configuration, prompt) pairs of the first repeat."""
+    return [(config, prompt) for config, prompt, repeat in session_schedule(run_dir) if repeat == 0]

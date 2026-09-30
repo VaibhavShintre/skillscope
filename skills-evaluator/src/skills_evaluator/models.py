@@ -97,6 +97,8 @@ class RunPlan(BaseModel):
     estimated_max_cost_usd: float
     estimated_expected_cost_usd: float = 0.0
     planned_sessions: int
+    # How many times each (configuration, prompt) cell is run.
+    repeats: int = 1
     # Auto-discovered skills the planner left out because the caps could not cover them.
     dropped_candidates: list[str] = Field(default_factory=list)
 
@@ -116,6 +118,7 @@ class SessionResult(BaseModel):
     duration_ms: int = 0
     outcome: str
     error: str | None = None
+    repeat: int = 0  # which run of the cell this is; 0 for the first (and for older runs)
 
 
 class LabelSummary(BaseModel):
@@ -141,8 +144,24 @@ class ConfigScore(BaseModel):
     accuracy: float | None = None  # plain share of labeled sessions handled correctly
     positive_prompts: int = 0
     negative_prompts: int = 0
+    # With repeats: the per-repeat balanced scores' range, the score when each cell is decided by
+    # majority vote, and how many of its cells changed outcome between repeats.
+    score_min: float | None = None
+    score_max: float | None = None
+    majority_score: float | None = None
+    cells: int = 0
+    unstable_cells: int = 0
     # True when its advantage over no skills is no larger than a useless decoy skill's.
     matches_decoy: bool = False
+
+
+class UnstablePrompt(BaseModel):
+    prompt_id: str
+    task: str
+    label: str
+    unstable_configs: int  # configurations in which its repeats disagreed
+    configs: int  # configurations that ran it more than once
+    worst_agreement: float  # the lowest share of repeats that agreed, e.g. 0.5
 
 
 class DecoyReport(BaseModel):
@@ -224,6 +243,12 @@ class Recommendation(BaseModel):
     noise_step: float | None = None
     decoy: DecoyReport | None = None
     what_to_do: Advice | None = None
+    repeats: int = 1
+    # The typical run-to-run range of a bundle's score across repeats (0 with one repeat).
+    measured_spread: float = 0.0
+    unstable_cells: int = 0  # cells (of bundle configurations) whose repeats disagreed
+    total_cells: int = 0  # cells that ran more than once
+    unstable_prompts: list[UnstablePrompt] = Field(default_factory=list)
     # The tolerance actually applied: at least one prompt's worth of score.
     effective_tolerance: float | None = None
     # Estimates for the sessions that ran, to compare with total_cost_usd.

@@ -114,6 +114,17 @@ a decoy skill's, and lists the exact install and remove steps for the project. I
 inconclusive, "use no skills", or has too little labeled evidence, it says that plainly and gives
 no advice.
 
+## Repeats
+
+`--repeats N` (1 to 9, default 1; odd numbers avoid ties) runs every configuration and prompt N
+times. The score pools all repeats: it is the mean over sessions, and the report shows each
+configuration's range across single repeats. A cell (one configuration and prompt) counts as
+correct by majority vote and is **unstable** when its repeats disagree; the most unstable prompts
+are listed. The noise floor is the larger of one prompt's worth of score and the measured
+run-to-run spread (the median, across bundles, of the range of a bundle's score over its repeats),
+so a lead only counts if it is bigger than both. Cost estimates and the cap scale with N, and the
+cap is still held to the worst case, so repeats need a larger `--cost-cap`.
+
 ## Scores, ties and the decoy control
 
 The score is **balanced**: the average of the positive-prompt score (prompts that expect a skill)

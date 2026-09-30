@@ -19,7 +19,13 @@ from skills_evaluator.planner import build_plan
 from skills_evaluator.profiler import profile_project
 from skills_evaluator.report import markdown_report, write_reports
 from skills_evaluator.skills import load_skill
-from skills_evaluator.storage import append_result, load_plan, load_results, session_order
+from skills_evaluator.storage import (
+    append_result,
+    load_plan,
+    load_results,
+    session_key,
+    session_schedule,
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -43,6 +49,7 @@ def _make_plan(
     seed: int,
     prompts: Path | None,
     decoy: bool = False,
+    repeats: int = 1,
 ):
     out.mkdir(parents=True, exist_ok=True)
     return build_plan(
@@ -57,6 +64,7 @@ def _make_plan(
         seed=seed,
         prompt_file=prompts,
         decoy=decoy,
+        repeats=repeats,
     )
 
 
@@ -77,6 +85,10 @@ def _print_plan(plan, run_dir: Path) -> None:
         )
     typer.echo(f"Configurations:   {len(plan.configurations)}")
     typer.echo(f"Planned sessions: {plan.planned_sessions}")
+    if plan.repeats > 1:
+        typer.echo(f"Repeats:          {plan.repeats} per configuration and prompt")
+        if plan.repeats % 2 == 0:
+            typer.echo("                  an odd number of repeats avoids majority ties")
     typer.echo(f"Expected cost:    ${plan.estimated_expected_cost_usd:.2f} (typical session)")
     typer.echo(f"Worst-case bound: ${plan.estimated_max_cost_usd:.2f} (what the cap is held to)")
     typer.echo(f"Hard cost cap:    ${plan.max_cost_usd:.2f}")
@@ -129,8 +141,8 @@ def _execute(run_dir: Path, fake: bool) -> Recommendation:
     prompts = {item.id: item for item in plan.prompts}
     candidates = {item.id: item for item in plan.candidates}
 
-    for config_id, prompt_id in session_order(run_dir):
-        key = f"{config_id}::{prompt_id}"
+    for config_id, prompt_id, repeat in session_schedule(run_dir):
+        key = session_key(config_id, prompt_id, repeat)
         if key in completed_keys:
             continue
         config = configs[config_id]
@@ -146,12 +158,16 @@ def _execute(run_dir: Path, fake: bool) -> Recommendation:
             )
             break
         result = engine.run(key, config_id, prompt, plan.project, available)
+        result = result.model_copy(update={"repeat": repeat})
         append_result(run_dir, result)
         results.append(result)
         completed_keys.add(key)
         current_cost += result.cost_usd
         marker = "ok" if result.outcome == "completed" else "error"
-        typer.echo(f"[{len(results)}/{plan.planned_sessions}] {marker} {config_id} / {prompt_id}")
+        suffix = f" (repeat {repeat + 1})" if plan.repeats > 1 else ""
+        typer.echo(
+            f"[{len(results)}/{plan.planned_sessions}] {marker} {config_id} / {prompt_id}{suffix}"
+        )
         if result.error and "authentication" in result.error.lower():
             typer.echo("Authentication error; stopping without retrying.")
             break
@@ -188,6 +204,12 @@ def plan_command(
         "--decoy/--no-decoy",
         help="Add a built-in useless skill as a control and report how often it fires.",
     ),
+    repeats: int = typer.Option(
+        1,
+        min=1,
+        max=9,
+        help="Run each configuration and prompt this many times (odd avoids ties).",
+    ),
 ) -> None:
     """Profile a project and create a free, reviewable experiment plan."""
     try:
@@ -203,6 +225,7 @@ def plan_command(
             seed,
             prompts,
             decoy,
+            repeats,
         )
     except (OSError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
@@ -228,6 +251,12 @@ def evaluate(
         "--decoy/--no-decoy",
         help="Add a built-in useless skill as a control and report how often it fires.",
     ),
+    repeats: int = typer.Option(
+        1,
+        min=1,
+        max=9,
+        help="Run each configuration and prompt this many times (odd avoids ties).",
+    ),
 ) -> None:
     """Plan and execute a bounded skill-combination evaluation."""
     try:
@@ -243,6 +272,7 @@ def evaluate(
             seed,
             prompts,
             decoy,
+            repeats,
         )
         _print_plan(plan, run_dir)
         if not fake:

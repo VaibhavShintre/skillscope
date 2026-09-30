@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import statistics
 from collections import Counter, defaultdict
 
 from skills_evaluator.costs import estimate_session
@@ -19,6 +20,7 @@ from skills_evaluator.models import (
     RunPlan,
     SessionResult,
     SkillVerdict,
+    UnstablePrompt,
 )
 
 _UNKNOWN = Label(UNLABELED, frozenset(), "heuristic")
@@ -46,8 +48,33 @@ def _correct(result: SessionResult, label: Label) -> bool | None:
 
 
 def _rate(entries: list[Judged], kind: str) -> tuple[float | None, int]:
-    matching = [correct for _, label, correct in entries if label.kind == kind]
-    return (sum(matching) / len(matching) if matching else None), len(matching)
+    """The share of sessions handled correctly, and how many distinct prompts they cover.
+
+    Every repeat is its own session, so the rate is pooled over repeats; the prompt count is what
+    a "prompt's worth" of score is measured against.
+    """
+    matching = [
+        (result.prompt_id, correct) for result, label, correct in entries if label.kind == kind
+    ]
+    rate = sum(correct for _, correct in matching) / len(matching) if matching else None
+    return rate, len({prompt_id for prompt_id, _ in matching})
+
+
+def _repeat_scores(entries: list[Judged]) -> list[float]:
+    """The balanced score of each complete repeat (partial rounds are left out)."""
+    by_repeat: dict[int, list[Judged]] = defaultdict(list)
+    for item in entries:
+        by_repeat[item[0].repeat].append(item)
+    full = max((len(chunk) for chunk in by_repeat.values()), default=0)
+    scores = []
+    for repeat in sorted(by_repeat):
+        chunk = by_repeat[repeat]
+        if len(chunk) != full:
+            continue
+        value = _balanced(_rate(chunk, POSITIVE)[0], _rate(chunk, NEGATIVE)[0])
+        if value is not None:
+            scores.append(value)
+    return scores
 
 
 def _balanced(positive: float | None, negative: float | None) -> float | None:
@@ -142,7 +169,10 @@ def analyze(
         if scores[config.id] is not None
     }
 
-    scored_per_config = min((len(entries) for entries in judged.values() if entries), default=0)
+    scored_per_config = min(
+        (len({item[0].prompt_id for item in entries}) for entries in judged.values() if entries),
+        default=0,
+    )
     positive_n = min((count for count in positive_counts.values() if count), default=0)
     negative_n = min((count for count in negative_counts.values() if count), default=0)
     # One prompt is the smallest difference a run can show. In a balanced score a positive
@@ -154,7 +184,19 @@ def analyze(
         noise_step = 1 / max(positive_n, negative_n)
     else:
         noise_step = 0.0
-    effective_tolerance = max(tolerance, noise_prompts * noise_step)
+    # Run-to-run spread, measured when cells were repeated: the typical range of a bundle's
+    # balanced score across its repeats. The no-skill baseline never varies (no tool is offered),
+    # so it is left out, and so is the decoy. It only ever widens the floor.
+    repeat_scores = {config.id: _repeat_scores(judged[config.id]) for config in plan.configurations}
+    spreads = [
+        max(values) - min(values)
+        for config in plan.configurations
+        if config.skill_ids
+        and not decoy_ids & set(config.skill_ids)
+        and len(values := repeat_scores[config.id]) >= 2
+    ]
+    measured_spread = statistics.median(spreads) if spreads else 0.0
+    effective_tolerance = max(tolerance, noise_prompts * noise_step, measured_spread)
 
     full_ids = frozenset(
         item.id for item in plan.candidates if not item.blocked and not item.decoy
@@ -460,6 +502,65 @@ def analyze(
             recommended_matches=bool(recommended and recommended.id in flagged),
         )
 
+    # Cells: one (bundle, prompt) pair across its repeats. Each is right by majority vote, and
+    # unstable when the repeats disagree; only cells run more than once can be unstable.
+    cell_outcomes: dict[str, dict[str, list[bool]]] = {}
+    for config in plan.configurations:
+        outcomes: dict[str, list[bool]] = defaultdict(list)
+        for result, _, correct in judged[config.id]:
+            outcomes[result.prompt_id].append(correct)
+        cell_outcomes[config.id] = outcomes
+
+    def majority_score(config_id: str) -> float | None:
+        rates = []
+        for kind in (POSITIVE, NEGATIVE):
+            votes = [
+                sum(values) * 2 > len(values)
+                for prompt_id, values in cell_outcomes[config_id].items()
+                if labels.get(prompt_id, _UNKNOWN).kind == kind
+            ]
+            rates.append(sum(votes) / len(votes) if votes else None)
+        return _balanced(*rates)
+
+    total_cells = unstable_cells = 0
+    cells_by_prompt: Counter[str] = Counter()
+    unstable_by_prompt: dict[str, list[float]] = defaultdict(list)
+    config_cells: dict[str, tuple[int, int]] = {}
+    for config in plan.configurations:
+        cells = unstable = 0
+        for prompt_id, values in cell_outcomes[config.id].items():
+            if len(values) < 2:
+                continue
+            cells += 1
+            correct_count = sum(values)
+            if 0 < correct_count < len(values):
+                unstable += 1
+                if config in bundles:
+                    unstable_by_prompt[prompt_id].append(
+                        max(correct_count, len(values) - correct_count) / len(values)
+                    )
+            if config in bundles:
+                cells_by_prompt[prompt_id] += 1
+        config_cells[config.id] = (cells, unstable)
+        if config in bundles:
+            total_cells += cells
+            unstable_cells += unstable
+    unstable_prompts = [
+        UnstablePrompt(
+            prompt_id=prompt_id,
+            task=_task_kind(prompt_by_id.get(prompt_id), True),
+            label=labels.get(prompt_id, _UNKNOWN).kind,
+            unstable_configs=len(agreements),
+            configs=cells_by_prompt[prompt_id],
+            worst_agreement=round(min(agreements), 4),
+        )
+        for prompt_id, agreements in unstable_by_prompt.items()
+    ]
+    unstable_prompts.sort(
+        key=lambda item: (-item.unstable_configs, item.worst_agreement, item.prompt_id)
+    )
+    unstable_prompts = [] if insufficient else unstable_prompts[:5]
+
     names = {item.id: item.name for item in plan.candidates}
     config_scores = (
         []
@@ -479,6 +580,19 @@ def analyze(
                 ),
                 positive_prompts=positive_counts[config.id],
                 negative_prompts=negative_counts[config.id],
+                score_min=(
+                    _round(min(repeat_scores[config.id]))
+                    if len(repeat_scores[config.id]) >= 2
+                    else None
+                ),
+                score_max=(
+                    _round(max(repeat_scores[config.id]))
+                    if len(repeat_scores[config.id]) >= 2
+                    else None
+                ),
+                majority_score=_round(majority_score(config.id)),
+                cells=config_cells[config.id][0],
+                unstable_cells=config_cells[config.id][1],
                 matches_decoy=config.id in flagged,
             )
             for config in plan.configurations
@@ -560,7 +674,8 @@ def analyze(
     if positive_n and negative_n:
         limitations.append(
             f"Each configuration was scored on {positive_n} positive and {negative_n} negative "
-            f"labeled prompts. One positive prompt moves the balanced score by "
+            f"labeled prompts{f', each run {plan.repeats} times' if plan.repeats > 1 else ''}. "
+            f"One positive prompt moves the balanced score by "
             f"{50 / positive_n:.1f} points and one negative prompt by {50 / negative_n:.1f}; a "
             "difference of one prompt is treated as a tie, and smaller differences are not "
             "statistically significant."
@@ -570,6 +685,18 @@ def analyze(
         limitations.append(
             f"Only {kind} prompts are labeled, so the score is not balanced and silence "
             "cannot be told apart from being right."
+        )
+    if unstable_cells:
+        limitations.append(
+            f"{unstable_cells} of {total_cells} repeated cells changed outcome between repeats"
+            + (f", so the measured spread ({measured_spread * 100:.1f} points) is part of the "
+               "noise floor" if measured_spread else "")
+            + "."
+        )
+    if plan.repeats > 1 and plan.repeats % 2 == 0:
+        limitations.append(
+            f"{plan.repeats} repeats can tie on a cell; a tied cell is not counted as correct "
+            "by majority vote. An odd number of repeats avoids this."
         )
     prompts_by_id = {item.id: item for item in plan.prompts}
     configs_by_id = {item.id: item for item in plan.configurations}
@@ -612,6 +739,11 @@ def analyze(
         scored_prompts_per_config=scored_per_config,
         positive_prompts_per_config=positive_n,
         negative_prompts_per_config=negative_n,
+        repeats=plan.repeats,
+        measured_spread=round(measured_spread, 4),
+        unstable_cells=unstable_cells,
+        total_cells=total_cells,
+        unstable_prompts=unstable_prompts,
         tolerance=tolerance,
         total_cost_usd=round(sum(item.cost_usd for item in results), 6),
         completed_sessions=len(completed),

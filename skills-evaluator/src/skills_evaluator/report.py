@@ -189,7 +189,13 @@ def markdown_report(
         + (f" [{best_names}]" if best_names else ""),
         f"- Completed sessions: **{recommendation.completed_sessions}/{plan.planned_sessions}**",
         _cost_line(recommendation),
-        f"- Noise tolerance: **{_pct(recommendation.effective_tolerance)}**",
+        f"- Noise tolerance: **{_pct(recommendation.effective_tolerance)}**"
+        + (
+            f" (the larger of one prompt and the measured run-to-run spread, "
+            f"{_pct(recommendation.measured_spread)}; {recommendation.repeats} repeats)"
+            if recommendation.repeats > 1
+            else ""
+        ),
         f"- Prompts: **{recommendation.labeling.positive_prompts} positive, "
         f"{recommendation.labeling.negative_prompts} negative, "
         f"{recommendation.labeling.unlabeled_prompts} unlabeled** "
@@ -223,20 +229,52 @@ def markdown_report(
             f"{_pct(item.recall)} | {_pct(item.singleton_score)} | {delta} | {inside} |"
         )
     if recommendation.config_scores:
+        repeated = recommendation.repeats > 1
         lines += [
             "",
             "## Scores by configuration",
             "",
-            "| Configuration | Skills | Positive | Negative | Balanced | Plain accuracy | Note |",
-            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+            *(
+                [
+                    f"Scores are means over {recommendation.repeats} repeats; the range is the "
+                    "lowest to the highest single-repeat score.",
+                    "",
+                ]
+                if repeated
+                else []
+            ),
+            "| Configuration | Skills | Positive | Negative | Balanced | Plain accuracy |"
+            + (" Range | Unstable cells |" if repeated else "")
+            + " Note |",
+            "| --- | --- | ---: | ---: | ---: | ---: |"
+            + (" ---: | ---: |" if repeated else "")
+            + " --- |",
         ]
         for entry in recommendation.config_scores:
             note = "matches the decoy's lead" if entry.matches_decoy else ""
+            extra = ""
+            if repeated:
+                span = (
+                    "n/a"
+                    if entry.score_min is None
+                    else f"{_pct(entry.score_min)}–{_pct(entry.score_max)}"
+                )
+                extra = f" {span} | {entry.unstable_cells}/{entry.cells} |"
             lines.append(
                 f"| {entry.id} | {', '.join(entry.skill_names) or '(none)'} | "
                 f"{_pct(entry.positive_score)} | {_pct(entry.negative_score)} | "
-                f"{_pct(entry.score)} | {_pct(entry.accuracy)} | {note} |"
+                f"{_pct(entry.score)} | {_pct(entry.accuracy)} |{extra} {note} |"
             )
+        if recommendation.unstable_prompts:
+            lines += ["", "## Most unstable prompts", ""]
+            lines += [
+                f"- {item.prompt_id} ("
+                + (f"{item.task}, " if item.task != item.prompt_id else "")
+                + f"{item.label}): repeats disagreed in "
+                f"{item.unstable_configs} of {item.configs} configurations; the least agreement "
+                f"was {item.worst_agreement:.0%} of repeats"
+                for item in recommendation.unstable_prompts
+            ]
     lines.extend(_decoy_lines(recommendation))
     if recommendation.labeling.unlabeled_prompt_ids:
         lines.extend(["", "## Unlabeled prompts", ""])
