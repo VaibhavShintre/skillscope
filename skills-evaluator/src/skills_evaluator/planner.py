@@ -7,9 +7,15 @@ from pathlib import Path
 
 import yaml
 
-from skills_evaluator.engine import session_reservation
+from skills_evaluator.costs import estimate_session
 from skills_evaluator.labels import stamp_labels
-from skills_evaluator.models import ExperimentConfig, RunPlan
+from skills_evaluator.models import (
+    EvalPrompt,
+    ExperimentConfig,
+    ProjectProfile,
+    RunPlan,
+    SkillCandidate,
+)
 from skills_evaluator.profiler import profile_project
 from skills_evaluator.prompts import apply_label_overrides, generate_prompts, load_prompt_file
 from skills_evaluator.skills import discover_candidates
@@ -55,6 +61,19 @@ def _configurations(skill_ids: list[str]) -> list[ExperimentConfig]:
     return list(unique.values())
 
 
+def _config_costs(
+    model: str,
+    profile: ProjectProfile,
+    config: ExperimentConfig,
+    prompts: list[EvalPrompt],
+    by_id: dict[str, SkillCandidate],
+) -> tuple[float, float]:
+    """(worst-case, expected) cost of running every prompt under one configuration."""
+    skills = [by_id[item] for item in config.skill_ids]
+    estimates = [estimate_session(model, profile, prompt, skills) for prompt in prompts]
+    return sum(item.worst_usd for item in estimates), sum(item.expected_usd for item in estimates)
+
+
 def build_plan(
     project: Path,
     sources: list[str],
@@ -75,21 +94,15 @@ def build_plan(
         include_anthropic,
         maximum_candidates,
     )
-    reservation = session_reservation(model)
-    if reservation > max_cost_usd:
-        raise ValueError(
-            f"The ${max_cost_usd:.2f} cap cannot reserve one bounded {model} session "
-            f"(${reservation:.4f})."
-        )
-    cost_session_limit = max(1, int(max_cost_usd / reservation))
-    session_limit = min(max_sessions, cost_session_limit)
     while candidates:
-        active_count = sum(not item.blocked for item in candidates)
-        generated = generate_prompts(profile, candidates)
-        user_prompts = load_prompt_file(prompt_file, candidates)[0] if prompt_file else []
-        prompt_count = len(generated) + len(user_prompts)
-        core_config_count = active_count + 2 if active_count else 1
-        if prompt_count * core_config_count <= session_limit:
+        active = [item for item in candidates if not item.blocked]
+        by_id = {item.id: item for item in candidates}
+        drafts = generate_prompts(profile, candidates)
+        if prompt_file:
+            drafts += load_prompt_file(prompt_file, candidates)[0]
+        core = _configurations([item.id for item in active])[: len(active) + 2 if active else 1]
+        core_worst = sum(_config_costs(model, profile, item, drafts, by_id)[0] for item in core)
+        if len(drafts) * len(core) <= max_sessions and core_worst <= max_cost_usd:
             break
         removable = next(
             (item for item in reversed(candidates) if not item.user_requested), None
@@ -114,13 +127,29 @@ def build_plan(
         prompts = apply_label_overrides(prompts, overrides)
         prompts.extend(user_prompts)
     prompts = stamp_labels(prompts, candidates)
-    configs = _configurations([item.id for item in candidates if not item.blocked])
+    by_id = {item.id: item for item in candidates}
+    active_ids = [item.id for item in candidates if not item.blocked]
+    all_configs = _configurations(active_ids)
+    core_count = len(active_ids) + 2 if active_ids else 1
+    # Keep configurations in order until the cost cap (on the worst case) or the session cap
+    # would be exceeded, but never fewer than the core baseline/singleton/full set.
+    configs: list[ExperimentConfig] = []
+    worst_total = expected_total = 0.0
+    for index, config in enumerate(all_configs):
+        worst, expected = _config_costs(model, profile, config, prompts, by_id)
+        if index >= core_count and (
+            worst_total + worst > max_cost_usd or (len(configs) + 1) * len(prompts) > max_sessions
+        ):
+            break
+        configs.append(config)
+        worst_total += worst
+        expected_total += expected
     planned = len(prompts) * len(configs)
-    if planned > session_limit:
-        core_config_count = sum(not item.blocked for item in candidates) + 2
-        allowed_configs = max(core_config_count, session_limit // max(1, len(prompts)))
-        configs = configs[:allowed_configs]
-        planned = len(prompts) * len(configs)
+    if worst_total > max_cost_usd or planned > max_sessions:
+        raise ValueError(
+            f"The ${max_cost_usd:.2f} cap cannot cover even the baseline sessions for {model} "
+            f"(worst case ${worst_total:.2f}, {planned} sessions)."
+        )
     run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{profile.content_hash[:8]}"
     plan = RunPlan(
         run_id=run_id,
@@ -132,7 +161,8 @@ def build_plan(
         seed=seed,
         max_sessions=max_sessions,
         max_cost_usd=max_cost_usd,
-        estimated_max_cost_usd=round(planned * reservation, 6),
+        estimated_max_cost_usd=round(worst_total, 6),
+        estimated_expected_cost_usd=round(expected_total, 6),
         planned_sessions=planned,
     )
     run_dir = run_root / run_id
@@ -183,7 +213,8 @@ def build_plan(
                 "model": model,
                 "seed": seed,
                 "max_cost_usd": max_cost_usd,
-                "estimated_max_cost_usd": round(planned * reservation, 6),
+                "estimated_max_cost_usd": round(worst_total, 6),
+                "estimated_expected_cost_usd": round(expected_total, 6),
             },
             indent=2,
         ),

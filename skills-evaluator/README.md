@@ -84,6 +84,20 @@ YAML entries can override any label, including a generated prompt's, by `id`:
 Skills added from the public catalog rather than passed with `--skill` are marked
 `auto-discovered` in the plan and the report. Pass `--offline` to evaluate only your own.
 
+## Cost and noise
+
+The plan prints two cost figures. The **expected cost** is what a typical session costs (about 520
+output tokens, skills loaded in about 60% of sessions). The **worst-case bound** is built from the
+actual system prompt, tool definitions, prompt and skill text, and the harness's 3-turn and
+`max_tokens` limits; the `--cost-cap` is held to that bound, session by session. Token counts are
+estimated from characters, so both are estimates. The final report shows expected, actual and the
+bound side by side.
+
+A run scores each configuration on a handful of prompts, so one prompt is a large step (for
+example 6.7 points on 15 prompts). The tolerance used to compare the baseline and the bundles is
+therefore never smaller than one prompt: a one-prompt lead over "no skills" is reported as
+**inconclusive, gap within noise**, not as a win.
+
 ## Privacy and safety
 
 The API key is read only from `ANTHROPIC_API_KEY`. It is never accepted on the

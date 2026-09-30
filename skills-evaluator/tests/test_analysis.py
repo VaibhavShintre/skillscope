@@ -18,6 +18,11 @@ from skills_evaluator.planner import _configurations
 from skills_evaluator.report import markdown_report, write_reports
 
 
+def analyze_exact(plan, results):
+    """The analysis with no minimum tolerance, for tests with only a handful of prompts."""
+    return analyze(plan, results, noise_prompts=0)
+
+
 def _skill(index: int) -> SkillCandidate:
     return SkillCandidate(
         id=f"skill-{index}",
@@ -98,7 +103,7 @@ def test_leave_one_out_delta_is_measured_however_the_planner_deduplicated_it(
     plan = _plan(skill_count)
     assert {item.kind for item in plan.configurations} & {"leave-one-out"} == surviving_kinds
 
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
 
     # Dropping any one skill loses exactly one of the skill_count + 1 prompts.
     expected = round(1 / (skill_count + 1), 4)
@@ -110,7 +115,7 @@ def test_leave_one_out_delta_is_measured_however_the_planner_deduplicated_it(
 
 def test_single_skill_delta_is_measured_against_the_baseline() -> None:
     plan = _plan(1)
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
     # Baseline gets only the control right (1/2); the skill's own bundle gets both.
     assert recommendation.verdicts[0].leave_one_out_delta == 0.5
 
@@ -121,7 +126,7 @@ def test_unmeasured_leave_one_out_is_unknown_not_zero(tmp_path: Path) -> None:
     plan = _plan(3, keep_configs=5)
     assert {item.kind for item in plan.configurations} == {"baseline", "singleton", "full"}
 
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
 
     assert recommendation.recommended_count == 3
     for verdict in recommendation.verdicts:
@@ -150,8 +155,8 @@ def test_unlabeled_prompts_are_excluded_never_counted_as_correct(tmp_path: Path)
     quiet = _results(plan)
     loud = [_fire_everything(item) if item.prompt_id == "mystery" else item for item in quiet]
 
-    first = analyze(plan, quiet)
-    second = analyze(plan, loud)
+    first = analyze_exact(plan, quiet)
+    second = analyze_exact(plan, loud)
 
     # What the model does on an unlabeled prompt cannot move any score or precision.
     assert first.best_score == second.best_score == 1.0
@@ -174,7 +179,7 @@ def test_nothing_labeled_means_no_score_and_no_recommendation(tmp_path: Path) ->
     ]
     plan = _plan(2)
     plan = plan.model_copy(update={"prompts": unlabeled})
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
 
     assert recommendation.best_score is None
     assert recommendation.recommended_score is None
@@ -195,12 +200,12 @@ def test_precision_is_per_configuration_and_counts_wrong_and_negative_firings() 
         for index in range(2)
     ]
     plan = _plan(2, extra_prompts=negatives)
-    ideal = analyze(plan, _results(plan))
+    ideal = analyze_exact(plan, _results(plan))
     assert ideal.best_score == 1.0
     assert [item.precision for item in ideal.verdicts] == [1.0, 1.0]
 
     # 5 labeled prompts (2 positive, control, 2 negative); the skill fires on all of them.
-    noisy = analyze(plan, [_fire_everything(item) for item in _results(plan)])
+    noisy = analyze_exact(plan, [_fire_everything(item) for item in _results(plan)])
     first = noisy.verdicts[0]
     assert set(first.precision_by_config) == {"singleton-01", "full"}
     assert first.precision_by_config == {"singleton-01": 0.2, "full": 0.2}
@@ -216,7 +221,7 @@ def test_no_skills_is_recommended_when_the_baseline_beats_every_bundle(tmp_path:
     ]
     plan = _plan(2, extra_prompts=negatives)
     # An over-eager model: baseline gets 3/5 (silent on negatives), every bundle scores <= 1/5.
-    recommendation = analyze(plan, [_fire_everything(item) for item in _results(plan)])
+    recommendation = analyze_exact(plan, [_fire_everything(item) for item in _results(plan)])
 
     assert recommendation.no_skills_recommended is True
     assert recommendation.recommended_config == "baseline"
@@ -241,7 +246,7 @@ def test_no_skills_is_recommended_when_the_baseline_beats_every_bundle(tmp_path:
 def test_skills_that_never_fire_do_not_earn_a_recommendation() -> None:
     plan = _plan(2)
     silent = [item.model_copy(update={"selected_skills": []}) for item in _results(plan)]
-    recommendation = analyze(plan, silent)
+    recommendation = analyze_exact(plan, silent)
 
     # Every configuration scores exactly like the baseline, and the smaller bundle wins ties.
     assert recommendation.no_skills_recommended is True
@@ -251,7 +256,7 @@ def test_skills_that_never_fire_do_not_earn_a_recommendation() -> None:
 
 def test_a_bundle_that_beats_the_baseline_is_still_recommended() -> None:
     plan = _plan(2)
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
     assert recommendation.no_skills_recommended is False
     assert recommendation.recommended_count == 2
     assert recommendation.baseline_score == round(1 / 3, 4)
@@ -259,7 +264,7 @@ def test_a_bundle_that_beats_the_baseline_is_still_recommended() -> None:
 
 def test_report_warns_how_few_prompts_back_each_score() -> None:
     plan = _plan(2)  # two skill prompts plus one control: 3 labeled prompts per configuration
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
     assert recommendation.scored_prompts_per_config == 3
     assert any(
         "only 3 labeled prompts (1 prompt = 33.3 points)" in item
@@ -296,8 +301,8 @@ def test_uncategorized_skill_activations_are_ignored_on_capability_prompts() -> 
             out.append(item.model_copy(update={"selected_skills": fired}))
         return out
 
-    quiet = analyze(plan, results(False))
-    loud = analyze(plan, results(True))
+    quiet = analyze_exact(plan, results(False))
+    loud = analyze_exact(plan, results(True))
 
     # Every prompt is labeled: the missing category did not blank out the project prompts.
     assert quiet.labeling.unlabeled_prompts == 0
@@ -318,7 +323,7 @@ def test_uncategorized_skill_activations_are_ignored_on_capability_prompts() -> 
         else item
         for item in results(False)
     ]
-    penalized = analyze(plan, wrong)
+    penalized = analyze_exact(plan, wrong)
     assert penalized.best_score is not None and penalized.best_score < 1.0
     assert penalized.verdicts[0].precision is not None and penalized.verdicts[0].precision < 1.0
 
@@ -333,7 +338,7 @@ def _mostly_unlabeled_plan(unlabeled: int) -> RunPlan:
 
 def test_more_than_half_unlabeled_means_insufficient_evidence(tmp_path: Path) -> None:
     plan = _mostly_unlabeled_plan(4)  # 4 of 7 prompts unlabeled
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
 
     assert recommendation.insufficient_evidence is True
     assert recommendation.no_skills_recommended is False
@@ -370,7 +375,7 @@ def test_more_than_half_unlabeled_means_insufficient_evidence(tmp_path: Path) ->
 
 def test_exactly_half_unlabeled_is_still_enough_evidence() -> None:
     plan = _mostly_unlabeled_plan(3)  # 3 of 6 prompts unlabeled: not more than half
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
     assert recommendation.insufficient_evidence is False
     assert recommendation.recommended_count == 2
     assert recommendation.best_score == 1.0
@@ -387,7 +392,7 @@ def test_report_marks_auto_discovered_skills() -> None:
             ]
         }
     )
-    recommendation = analyze(plan, _results(plan))
+    recommendation = analyze_exact(plan, _results(plan))
     assert [item.auto_discovered for item in recommendation.verdicts] == [False, True]
 
     report = markdown_report(plan, recommendation)
@@ -398,7 +403,8 @@ def test_report_marks_auto_discovered_skills() -> None:
 
     requested = [item.model_copy(update={"user_requested": True}) for item in plan.candidates]
     everything_requested = plan.model_copy(update={"candidates": requested})
-    clean = markdown_report(everything_requested, analyze(everything_requested, _results(plan)))
+    clean_recommendation = analyze_exact(everything_requested, _results(plan))
+    clean = markdown_report(everything_requested, clean_recommendation)
     assert "auto-discovered" not in clean and "--offline" not in clean
 
 
@@ -416,3 +422,79 @@ def test_plan_output_marks_auto_discovered_skills(capsys, tmp_path: Path) -> Non
     lines = capsys.readouterr().out.splitlines()
     assert any("skill-1" in line and "auto-discovered" not in line for line in lines)
     assert any("skill-2" in line and "auto-discovered" in line for line in lines)
+
+
+def _padded(skill_count: int, padding: int) -> RunPlan:
+    controls = [
+        EvalPrompt(id=f"pad-{index}", text="x", origin="control") for index in range(padding)
+    ]
+    return _plan(skill_count, extra_prompts=controls)
+
+
+def test_a_one_prompt_lead_over_no_skills_is_inconclusive(tmp_path: Path) -> None:
+    plan = _padded(1, 10)  # 12 prompts per config; the skill wins exactly one (its own positive)
+    recommendation = analyze(plan, _results(plan))
+
+    assert recommendation.scored_prompts_per_config == 12
+    assert recommendation.effective_tolerance == round(1 / 12, 4)
+    assert recommendation.baseline_score == round(11 / 12, 4)
+    assert recommendation.best_score == 1.0
+    assert recommendation.no_skills_recommended is True
+    assert recommendation.inconclusive is True
+    assert recommendation.recommended_count == 0
+    assert recommendation.verdicts[0].verdict == "no_lift"
+    assert "beyond the noise floor" in recommendation.verdicts[0].reasons[0]
+
+    report = markdown_report(plan, recommendation)
+    assert "**Inconclusive — gap within noise.**" in report
+    assert "a gap of 8.3 points" in report
+    assert "one prompt = 8.3 points" in report
+    assert "Recommended bundle: **No skills (inconclusive — gap within noise)**" in report
+    assert "Noise tolerance: **8.3%**" in report
+    write_reports(tmp_path, plan, recommendation)
+    saved = json.loads((tmp_path / "recommendation.json").read_text(encoding="utf-8"))
+    assert saved["inconclusive"] is True and saved["effective_tolerance"] == 0.0833
+    assert "Inconclusive" in (tmp_path / "report.html").read_text(encoding="utf-8")
+
+    # The same run with the floor switched off would have recommended the skill.
+    assert analyze(plan, _results(plan), noise_prompts=0).recommended_count == 1
+
+
+def test_a_two_prompt_lead_is_a_real_gap() -> None:
+    plan = _padded(2, 10)  # 13 prompts per config; the baseline misses both positives
+    recommendation = analyze(plan, _results(plan))
+    assert recommendation.baseline_score == round(11 / 13, 4)
+    assert recommendation.no_skills_recommended is False
+    assert recommendation.inconclusive is False
+    # Singletons trail the full bundle by one prompt, which is a tie, so the smaller bundle wins.
+    assert recommendation.recommended_count == 1
+    assert "Inconclusive" not in markdown_report(plan, recommendation)
+
+
+def test_baseline_far_ahead_is_a_clear_no_skills_not_inconclusive() -> None:
+    negatives = [
+        EvalPrompt(id=f"neg-{index}", text="x", origin="project", label="negative")
+        for index in range(10)
+    ]
+    plan = _plan(2, extra_prompts=negatives)
+    # Every skill fires on everything: bundles fail all 10 negatives, the baseline passes them.
+    recommendation = analyze(plan, [_fire_everything(item) for item in _results(plan)])
+    assert recommendation.no_skills_recommended is True
+    assert recommendation.inconclusive is False
+    report = markdown_report(plan, recommendation)
+    assert "**Recommendation: use no skills.**" in report
+    assert "noise tolerance 7.7%" in report  # one of 13 prompts, not the configured 2%
+    assert "Inconclusive" not in report
+
+
+def test_report_compares_expected_and_actual_cost() -> None:
+    plan = _plan(2)
+    results = [item.model_copy(update={"cost_usd": 0.001}) for item in _results(plan)]
+    recommendation = analyze_exact(plan, results)
+    assert recommendation.total_cost_usd == round(0.001 * len(results), 6)
+    assert 0 < recommendation.expected_cost_usd < recommendation.worst_case_cost_usd
+    report = markdown_report(plan, recommendation)
+    assert f"actual ${recommendation.total_cost_usd:.4f}" in report
+    assert f"expected ${recommendation.expected_cost_usd:.4f}" in report
+    assert f"worst-case bound ${recommendation.worst_case_cost_usd:.4f}" in report
+    assert "of expected and" in report and "of the bound" in report

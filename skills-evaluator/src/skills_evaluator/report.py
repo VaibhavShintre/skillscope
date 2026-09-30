@@ -10,6 +10,20 @@ def _pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
 
 
+def _cost_line(recommendation: Recommendation) -> str:
+    actual = recommendation.total_cost_usd
+    line = (
+        f"- Cost: **actual ${actual:.4f}**; expected ${recommendation.expected_cost_usd:.4f}; "
+        f"worst-case bound ${recommendation.worst_case_cost_usd:.4f}"
+    )
+    if actual and recommendation.expected_cost_usd and recommendation.worst_case_cost_usd:
+        line += (
+            f" (actual was {actual / recommendation.expected_cost_usd:.0%} of expected and "
+            f"{actual / recommendation.worst_case_cost_usd:.0%} of the bound)"
+        )
+    return line
+
+
 def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
     names = {item.id: item.name for item in plan.candidates}
     auto = {item.id for item in plan.candidates if not item.user_requested}
@@ -30,14 +44,29 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
                 "",
             ]
         )
-    if recommendation.no_skills_recommended:
+    if recommendation.no_skills_recommended and recommendation.inconclusive:
+        points = recommendation.scored_prompts_per_config
+        gap = abs((recommendation.best_score or 0) - (recommendation.baseline_score or 0))
+        lines.extend(
+            [
+                "> **Inconclusive — gap within noise.** The best skill bundle scored "
+                f"{_pct(recommendation.best_score)} against {_pct(recommendation.baseline_score)} "
+                f"for no skills, a gap of {gap * 100:.1f} points, within the noise floor of "
+                f"{_pct(recommendation.effective_tolerance)}"
+                + (f" (one prompt = {100 / points:.1f} points)" if points else "")
+                + ". No skills is listed only because it is the simplest option; this run "
+                "cannot show that skills help or hurt.",
+                "",
+            ]
+        )
+    elif recommendation.no_skills_recommended:
         lines.extend(
             [
                 "> **Recommendation: use no skills.** The no-skill baseline scored "
                 f"{_pct(recommendation.baseline_score)}, at least as high as the best skill "
-                f"bundle ({_pct(recommendation.best_score)}, tolerance "
-                f"{recommendation.tolerance:.0%}). None of the tested bundles improved on "
-                "having no skills.",
+                f"bundle ({_pct(recommendation.best_score)}, noise tolerance "
+                f"{_pct(recommendation.effective_tolerance)}). None of the tested bundles "
+                "improved on having no skills.",
                 "",
             ]
         )
@@ -47,6 +76,8 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         + (
             "none (insufficient labeled evidence)"
             if recommendation.insufficient_evidence
+            else "No skills (inconclusive — gap within noise)"
+            if recommendation.inconclusive
             else ", ".join(bundle) or "No skills"
         )
         + "**",
@@ -54,7 +85,8 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         f"- No-skill baseline score: **{_pct(recommendation.baseline_score)}**",
         f"- Best observed score: **{_pct(recommendation.best_score)}**",
         f"- Completed sessions: **{recommendation.completed_sessions}/{plan.planned_sessions}**",
-        f"- Recorded cost: **${recommendation.total_cost_usd:.4f}**",
+        _cost_line(recommendation),
+        f"- Noise tolerance: **{_pct(recommendation.effective_tolerance)}**",
         f"- Prompts: **{recommendation.labeling.positive_prompts} positive, "
         f"{recommendation.labeling.negative_prompts} negative, "
         f"{recommendation.labeling.unlabeled_prompts} unlabeled** "
