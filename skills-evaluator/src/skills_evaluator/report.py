@@ -12,8 +12,24 @@ def _pct(value: float | None) -> str:
 
 def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
     names = {item.id: item.name for item in plan.candidates}
-    bundle = [names.get(item, item) for item in recommendation.recommended_skill_ids]
+    auto = {item.id for item in plan.candidates if not item.user_requested}
+    bundle = [
+        names.get(item, item) + (" (auto-discovered)" if item in auto else "")
+        for item in recommendation.recommended_skill_ids
+    ]
     lines = [f"# Skills Evaluator report: {plan.project.name}", ""]
+    if recommendation.insufficient_evidence:
+        labeling = recommendation.labeling
+        lines.extend(
+            [
+                "> **Insufficient labeled evidence: no recommendation is issued.** "
+                f"{labeling.unlabeled_prompts} of {len(plan.prompts)} prompts are unlabeled, "
+                "more than half, so any score would describe a minority of the prompts. "
+                "Label them in the prompts YAML or add skill categories, then re-run the "
+                "analysis. Scores and per-skill numbers are withheld.",
+                "",
+            ]
+        )
     if recommendation.no_skills_recommended:
         lines.extend(
             [
@@ -27,7 +43,13 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         )
     lines += [
         f"- Recommended number of skills: **{recommendation.recommended_count}**",
-        f"- Recommended bundle: **{', '.join(bundle) if bundle else 'No skills'}**",
+        "- Recommended bundle: **"
+        + (
+            "none (insufficient labeled evidence)"
+            if recommendation.insufficient_evidence
+            else ", ".join(bundle) or "No skills"
+        )
+        + "**",
         f"- Recommended score: **{_pct(recommendation.recommended_score)}**",
         f"- No-skill baseline score: **{_pct(recommendation.baseline_score)}**",
         f"- Best observed score: **{_pct(recommendation.best_score)}**",
@@ -43,14 +65,26 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         "",
         "Precision is measured in the full bundle.",
         "",
-        "| Skill | Verdict | Precision | Recall | Singleton score | Leave-one-out delta |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    if any(item.auto_discovered for item in recommendation.verdicts):
+        lines.extend(
+            [
+                "Auto-discovered skills were added from a public catalog; you did not pass "
+                "them with `--skill`. Pass `--offline` to evaluate only the skills you name.",
+                "",
+            ]
+        )
+    lines += [
+        "| Skill | Origin | Verdict | Precision | Recall | Singleton score | "
+        "Leave-one-out delta |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for item in recommendation.verdicts:
         delta = "n/a" if item.leave_one_out_delta is None else f"{item.leave_one_out_delta:+.1%}"
+        origin = "auto-discovered" if item.auto_discovered else "requested"
         lines.append(
-            f"| {item.name} | {item.verdict} | {_pct(item.precision)} | {_pct(item.recall)} | "
-            f"{_pct(item.singleton_score)} | {delta} |"
+            f"| {item.name} | {origin} | {item.verdict} | {_pct(item.precision)} | "
+            f"{_pct(item.recall)} | {_pct(item.singleton_score)} | {delta} |"
         )
     if recommendation.labeling.unlabeled_prompt_ids:
         lines.extend(["", "## Unlabeled prompts", ""])

@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from skills_evaluator.analysis import analyze
+from skills_evaluator.cli import _print_plan, app
 from skills_evaluator.models import (
     EvalPrompt,
     ExperimentConfig,
@@ -265,3 +267,152 @@ def test_report_warns_how_few_prompts_back_each_score() -> None:
         for item in recommendation.limitations
     )
     assert "1 prompt = 33.3 points" in markdown_report(plan, recommendation)
+
+
+def _with_categories(plan: RunPlan, categories: dict[int, list[str]]) -> RunPlan:
+    candidates = [
+        item.model_copy(update={"categories": categories.get(index, [])})
+        for index, item in enumerate(plan.candidates, start=1)
+    ]
+    return plan.model_copy(update={"candidates": candidates})
+
+
+def test_uncategorized_skill_activations_are_ignored_on_capability_prompts() -> None:
+    # skill-1 is a frontend skill; skill-2 declares no category.
+    heuristic = [
+        EvalPrompt(id="ui", text="x", origin="project", capability="frontend"),
+        EvalPrompt(id="db", text="x", origin="project", capability="database"),
+    ]
+    plan = _with_categories(_plan(2, extra_prompts=heuristic), {1: ["frontend"]})
+
+    def results(skill_2_fires_on_db: bool) -> list[SessionResult]:
+        out = []
+        for item in _results(plan):
+            fired = item.selected_skills
+            if item.prompt_id == "ui" and "skill-1" in item.available_skills:
+                fired = ["skill-1"]  # correct: the frontend skill handles the UI prompt
+            if item.prompt_id == "db" and skill_2_fires_on_db:
+                fired = ["skill-2"] if "skill-2" in item.available_skills else fired
+            out.append(item.model_copy(update={"selected_skills": fired}))
+        return out
+
+    quiet = analyze(plan, results(False))
+    loud = analyze(plan, results(True))
+
+    # Every prompt is labeled: the missing category did not blank out the project prompts.
+    assert quiet.labeling.unlabeled_prompts == 0
+    assert quiet.labeling.positive_prompts == 3 and quiet.labeling.negative_prompts == 2
+    # What skill-2 does on a capability prompt is neither right nor wrong.
+    assert quiet.best_score == loud.best_score == 1.0
+    assert [item.precision for item in quiet.verdicts] == [1.0, 1.0]
+    assert loud.verdicts == quiet.verdicts
+    # ...but it is counted: skill-2 is available in singleton-02 and full.
+    assert quiet.labeling.unjudged_activations == 0
+    assert loud.labeling.unjudged_activations == 2
+    assert any("not judged on capability-derived prompts" in item for item in loud.limitations)
+
+    # The categorized skill is still judged: firing on the negative database prompt is wrong.
+    wrong = [
+        item.model_copy(update={"selected_skills": ["skill-1"]})
+        if item.prompt_id == "db" and "skill-1" in item.available_skills
+        else item
+        for item in results(False)
+    ]
+    penalized = analyze(plan, wrong)
+    assert penalized.best_score is not None and penalized.best_score < 1.0
+    assert penalized.verdicts[0].precision is not None and penalized.verdicts[0].precision < 1.0
+
+
+def _mostly_unlabeled_plan(unlabeled: int) -> RunPlan:
+    prompts = [
+        EvalPrompt(id=f"u{index}", text="x", origin="project", capability="accessibility")
+        for index in range(unlabeled)
+    ]
+    return _plan(2, extra_prompts=prompts)  # 3 labeled prompts plus the unlabeled ones
+
+
+def test_more_than_half_unlabeled_means_insufficient_evidence(tmp_path: Path) -> None:
+    plan = _mostly_unlabeled_plan(4)  # 4 of 7 prompts unlabeled
+    recommendation = analyze(plan, _results(plan))
+
+    assert recommendation.insufficient_evidence is True
+    assert recommendation.no_skills_recommended is False
+    assert recommendation.recommended_config == ""
+    assert recommendation.recommended_skill_ids == []
+    assert recommendation.recommended_count == 0
+    # The labeled minority scores perfectly, and that is exactly what must not be reported.
+    assert recommendation.best_score is None
+    assert recommendation.recommended_score is None
+    assert recommendation.baseline_score is None
+    assert all(item.verdict == "unverified" for item in recommendation.verdicts)
+    for item in recommendation.verdicts:
+        assert item.precision is None and item.recall is None
+        assert item.singleton_score is None and item.leave_one_out_delta is None
+        assert item.precision_by_config == {}
+    assert recommendation.limitations[0].startswith("Insufficient labeled evidence: 4 of 7")
+
+    report = markdown_report(plan, recommendation)
+    assert "**Insufficient labeled evidence: no recommendation is issued.**" in report
+    assert "Recommended bundle: **none (insufficient labeled evidence)**" in report
+    assert "100.0%" not in report
+    write_reports(tmp_path, plan, recommendation)
+    assert "Insufficient labeled evidence" in (tmp_path / "report.html").read_text(encoding="utf-8")
+    saved = json.loads((tmp_path / "recommendation.json").read_text(encoding="utf-8"))
+    assert saved["insufficient_evidence"] is True
+    assert saved["best_score"] is None
+
+    # The installer refuses to act on it.
+    (tmp_path / "run-manifest.json").write_text(plan.model_dump_json(), encoding="utf-8")
+    result = CliRunner().invoke(app, ["install", str(tmp_path), "--project", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "insufficient" in result.output.lower()
+
+
+def test_exactly_half_unlabeled_is_still_enough_evidence() -> None:
+    plan = _mostly_unlabeled_plan(3)  # 3 of 6 prompts unlabeled: not more than half
+    recommendation = analyze(plan, _results(plan))
+    assert recommendation.insufficient_evidence is False
+    assert recommendation.recommended_count == 2
+    assert recommendation.best_score == 1.0
+
+
+def test_report_marks_auto_discovered_skills() -> None:
+    plan = _plan(2)
+    first, second = plan.candidates
+    plan = plan.model_copy(
+        update={
+            "candidates": [
+                first.model_copy(update={"user_requested": True}),
+                second.model_copy(update={"user_requested": False}),
+            ]
+        }
+    )
+    recommendation = analyze(plan, _results(plan))
+    assert [item.auto_discovered for item in recommendation.verdicts] == [False, True]
+
+    report = markdown_report(plan, recommendation)
+    assert "| skill-1 | requested |" in report
+    assert "| skill-2 | auto-discovered |" in report
+    assert "Recommended bundle: **skill-1, skill-2 (auto-discovered)**" in report
+    assert "Pass `--offline`" in report
+
+    requested = [item.model_copy(update={"user_requested": True}) for item in plan.candidates]
+    everything_requested = plan.model_copy(update={"candidates": requested})
+    clean = markdown_report(everything_requested, analyze(everything_requested, _results(plan)))
+    assert "auto-discovered" not in clean and "--offline" not in clean
+
+
+def test_plan_output_marks_auto_discovered_skills(capsys, tmp_path: Path) -> None:
+    plan = _plan(2)
+    plan = plan.model_copy(
+        update={
+            "candidates": [
+                plan.candidates[0].model_copy(update={"user_requested": True}),
+                plan.candidates[1].model_copy(update={"user_requested": False}),
+            ]
+        }
+    )
+    _print_plan(plan, tmp_path)
+    lines = capsys.readouterr().out.splitlines()
+    assert any("skill-1" in line and "auto-discovered" not in line for line in lines)
+    assert any("skill-2" in line and "auto-discovered" in line for line in lines)
