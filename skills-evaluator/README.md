@@ -105,6 +105,15 @@ example 6.7 points on 15 prompts). The tolerance used to compare the baseline an
 therefore never smaller than one prompt: a one-prompt lead over "no skills" is reported as
 **inconclusive, gap within noise**, not as a win.
 
+## What to do
+
+Every report opens with a short **What to do** section, also saved as `what_to_do` in
+`recommendation.json`. For a recommended bundle it says which kinds of task each skill helped
+with, why each other skill was left out in one line, warns if the bundle's lead is no better than
+a decoy skill's, and lists the exact install and remove steps for the project. If the result is
+inconclusive, "use no skills", or has too little labeled evidence, it says that plainly and gives
+no advice.
+
 ## Scores, ties and the decoy control
 
 The score is **balanced**: the average of the positive-prompt score (prompts that expect a skill)

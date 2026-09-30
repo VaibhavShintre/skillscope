@@ -23,6 +23,12 @@ def analyze_exact(plan, results):
     return analyze(plan, results, noise_prompts=0)
 
 
+def _measured(recommendation):
+    """Verdicts without the raw firing counts, which include activations that are ignored."""
+    skip = {"fired", "helped_with", "over_fires_on"}
+    return [item.model_dump(exclude=skip) for item in recommendation.verdicts]
+
+
 def _skill(index: int) -> SkillCandidate:
     return SkillCandidate(
         id=f"skill-{index}",
@@ -162,7 +168,7 @@ def test_unlabeled_prompts_are_excluded_never_counted_as_correct(tmp_path: Path)
     # What the model does on an unlabeled prompt cannot move any score or precision.
     assert first.best_score == second.best_score == 1.0
     assert [item.precision for item in first.verdicts] == [1.0, 1.0]
-    assert first.verdicts == second.verdicts
+    assert _measured(first) == _measured(second)
     # It is counted and reported instead.
     assert first.labeling.unlabeled_prompts == 1
     assert first.labeling.unlabeled_prompt_ids == ["mystery"]
@@ -318,7 +324,7 @@ def test_uncategorized_skill_activations_are_ignored_on_capability_prompts() -> 
     # What skill-2 does on a capability prompt is neither right nor wrong.
     assert quiet.best_score == loud.best_score == 1.0
     assert [item.precision for item in quiet.verdicts] == [1.0, 1.0]
-    assert loud.verdicts == quiet.verdicts
+    assert _measured(loud) == _measured(quiet)
     # ...but it is counted: skill-2 is available in singleton-02 and full.
     assert quiet.labeling.unjudged_activations == 0
     assert loud.labeling.unjudged_activations == 2
