@@ -33,8 +33,8 @@ def token_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 
 
-def session_reservation(model: str, max_output_tokens: int = 800) -> float:
-    return token_cost(model, input_tokens=30_000, output_tokens=max_output_tokens)
+DEFAULT_MAX_TOKENS = 800
+MAX_TURNS = 3
 
 
 class FakeEngine:
@@ -97,7 +97,7 @@ def tool_definitions(skills: list[SkillCandidate]) -> list[dict[str, object]]:
 
 
 class AnthropicApiEngine:
-    def __init__(self, model: str, max_tokens: int = 800) -> None:
+    def __init__(self, model: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> None:
         try:
             from anthropic import Anthropic
         except ImportError as error:  # pragma: no cover - installation path
@@ -127,7 +127,7 @@ class AnthropicApiEngine:
         messages: list[dict[str, object]] = [{"role": "user", "content": prompt.text}]
         answer_parts: list[str] = []
         try:
-            for _ in range(3):
+            for _ in range(MAX_TURNS):
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
@@ -144,15 +144,22 @@ class AnthropicApiEngine:
                     elif block.type == "tool_use" and block.name == "load_skill":
                         skill_id = str(block.input.get("skill_id", ""))
                         skill = skill_by_id.get(skill_id)
-                        if skill and skill_id not in selected:
+                        already_loaded = skill_id in selected
+                        if skill and not already_loaded:
                             selected.append(skill_id)
+                        # Each skill body enters the context at most once per session, which
+                        # keeps the worst-case cost estimate a real bound.
+                        if skill is None:
+                            content = "Unknown skill id; do not use it."
+                        elif already_loaded:
+                            content = "This skill is already loaded above."
+                        else:
+                            content = skill.body
                         tool_results.append(
                             {
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
-                                "content": (
-                                    skill.body if skill else "Unknown skill id; do not use it."
-                                ),
+                                "content": content,
                                 "is_error": skill is None,
                             }
                         )

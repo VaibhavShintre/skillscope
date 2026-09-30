@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from skills_evaluator.costs import estimate_session
 from skills_evaluator.labels import (
     NEGATIVE,
     POSITIVE,
@@ -18,6 +19,8 @@ from skills_evaluator.models import (
 )
 
 _UNKNOWN = Label(UNLABELED, frozenset(), "heuristic")
+# Scores are ratios of small counts; compare them with a little slack.
+EPSILON = 1e-9
 
 
 def _correct(result: SessionResult, label: Label) -> bool | None:
@@ -32,7 +35,12 @@ def _correct(result: SessionResult, label: Label) -> bool | None:
     return bool(fired & label.expected) and fired <= label.expected
 
 
-def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02) -> Recommendation:
+def analyze(
+    plan: RunPlan,
+    results: list[SessionResult],
+    tolerance: float = 0.02,
+    noise_prompts: float = 1.0,
+) -> Recommendation:
     completed = [item for item in results if item.outcome == "completed"]
     labels = {prompt.id: resolve_label(prompt, plan.candidates) for prompt in plan.prompts}
     labeling = summarize_labels(plan.prompts, plan.candidates)
@@ -63,12 +71,22 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         for config in plan.configurations
         if scores[config.id] is not None
     }
+    scored_per_config = min((len(entries) for entries in judged.values() if entries), default=0)
+    # One prompt is the smallest difference a run can show, so it is never treated as a real
+    # gap: the tolerance is at least `noise_prompts` prompts' worth of score.
+    effective_tolerance = (
+        max(tolerance, noise_prompts / scored_per_config) if scored_per_config else tolerance
+    )
     full_ids = frozenset(item.id for item in plan.candidates if not item.blocked)
     non_baseline = [config for config in plan.configurations if config.skill_ids]
     measured = [config for config in non_baseline if scores[config.id] is not None]
     best_score = max((scores[config.id] for config in measured), default=None)
     eligible = (
-        [config for config in measured if scores[config.id] >= best_score - tolerance]
+        [
+            config
+            for config in measured
+            if scores[config.id] >= best_score - effective_tolerance - EPSILON
+        ]
         if best_score is not None
         else []
     )
@@ -80,7 +98,10 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         and baseline is not None
         and baseline_score is not None
         and best_score is not None
-        and baseline_score >= best_score - tolerance
+        and baseline_score >= best_score - effective_tolerance - EPSILON
+    )
+    inconclusive = no_skills_wins and (
+        abs(best_score - baseline_score) <= effective_tolerance + EPSILON
     )
     if insufficient:
         recommended = None
@@ -178,7 +199,10 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
             reasons.append("Most observed selections were outside its expected prompts.")
         elif no_skills_wins:
             verdict = "no_lift"
-            reasons.append("No bundle beat the no-skill baseline, so this skill added no lift.")
+            reasons.append(
+                "No bundle beat the no-skill baseline beyond the noise floor, so this skill "
+                "has not been shown to add lift."
+            )
         else:
             verdict = "redundant"
             reasons.append("It showed value but was unnecessary in the smallest near-best bundle.")
@@ -241,14 +265,32 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         )
     if best_score is None and not insufficient:
         limitations.append("No labeled sessions were scored, so no bundle could be recommended.")
-    scored = [len(entries) for entries in judged.values() if entries]
-    scored_per_config = min(scored, default=0)
     if scored_per_config:
         limitations.append(
             f"Each configuration was scored on only {scored_per_config} labeled prompts "
-            f"(1 prompt = {100 / scored_per_config:.1f} points), so score differences smaller "
-            "than that are not statistically significant."
+            f"(1 prompt = {100 / scored_per_config:.1f} points), so a difference of one prompt "
+            "is treated as a tie and smaller differences are not statistically significant."
         )
+    prompts_by_id = {item.id: item for item in plan.prompts}
+    configs_by_id = {item.id: item for item in plan.configurations}
+    candidates_by_id = {item.id: item for item in plan.candidates}
+    expected_cost = worst_cost = 0.0
+    try:
+        for result in results:
+            prompt = prompts_by_id.get(result.prompt_id)
+            config = configs_by_id.get(result.config_id)
+            if prompt is None or config is None:
+                continue
+            estimate = estimate_session(
+                plan.model,
+                plan.project,
+                prompt,
+                [candidates_by_id[item] for item in config.skill_ids if item in candidates_by_id],
+            )
+            expected_cost += estimate.expected_usd
+            worst_cost += estimate.worst_usd
+    except ValueError:  # a model with no configured pricing
+        expected_cost = worst_cost = 0.0
     recommended_score = scores.get(recommended.id) if recommended else None
     headline = None if insufficient else best_score
     return Recommendation(
@@ -260,6 +302,10 @@ def analyze(plan: RunPlan, results: list[SessionResult], tolerance: float = 0.02
         recommended_score=None if recommended_score is None else round(recommended_score, 4),
         no_skills_recommended=no_skills_wins,
         insufficient_evidence=insufficient,
+        inconclusive=inconclusive,
+        effective_tolerance=round(effective_tolerance, 4),
+        expected_cost_usd=round(expected_cost, 6),
+        worst_case_cost_usd=round(worst_cost, 6),
         baseline_score=(
             None if baseline_score is None or insufficient else round(baseline_score, 4)
         ),

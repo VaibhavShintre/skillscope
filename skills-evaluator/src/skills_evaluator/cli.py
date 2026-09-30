@@ -10,7 +10,8 @@ import typer
 
 from skills_evaluator import __version__
 from skills_evaluator.analysis import analyze
-from skills_evaluator.engine import AnthropicApiEngine, FakeEngine, session_reservation
+from skills_evaluator.costs import estimate_session
+from skills_evaluator.engine import AnthropicApiEngine, FakeEngine
 from skills_evaluator.labels import summarize_labels
 from skills_evaluator.models import Recommendation
 from skills_evaluator.planner import build_plan
@@ -73,7 +74,8 @@ def _print_plan(plan, run_dir: Path) -> None:
         )
     typer.echo(f"Configurations:   {len(plan.configurations)}")
     typer.echo(f"Planned sessions: {plan.planned_sessions}")
-    typer.echo(f"Reserved maximum: ${plan.estimated_max_cost_usd:.2f}")
+    typer.echo(f"Expected cost:    ${plan.estimated_expected_cost_usd:.2f} (typical session)")
+    typer.echo(f"Worst-case bound: ${plan.estimated_max_cost_usd:.2f} (what the cap is held to)")
     typer.echo(f"Hard cost cap:    ${plan.max_cost_usd:.2f}")
     typer.echo(f"Artifacts:        {run_dir.resolve()}")
     for candidate in plan.candidates:
@@ -107,7 +109,6 @@ def _execute(run_dir: Path, fake: bool) -> Recommendation:
     completed_keys = {item.session_key for item in results}
     current_cost = sum(item.cost_usd for item in results)
     engine = FakeEngine() if fake else AnthropicApiEngine(plan.model)
-    reservation = 0 if fake else session_reservation(plan.model)
     configs = {item.id: item for item in plan.configurations}
     prompts = {item.id: item for item in plan.prompts}
     candidates = {item.id: item for item in plan.candidates}
@@ -116,14 +117,18 @@ def _execute(run_dir: Path, fake: bool) -> Recommendation:
         key = f"{config_id}::{prompt_id}"
         if key in completed_keys:
             continue
+        config = configs[config_id]
+        prompt = prompts[prompt_id]
+        available = [candidates[skill_id] for skill_id in config.skill_ids]
+        # Hold the cap to this session's worst case, not to a flat guess.
+        reservation = (
+            0.0 if fake else estimate_session(plan.model, plan.project, prompt, available).worst_usd
+        )
         if current_cost + reservation > plan.max_cost_usd:
             typer.echo(
                 f"Cost cap reached before {key}; run is partial and can be resumed with a new plan."
             )
             break
-        config = configs[config_id]
-        prompt = prompts[prompt_id]
-        available = [candidates[skill_id] for skill_id in config.skill_ids]
         result = engine.run(key, config_id, prompt, plan.project, available)
         append_result(run_dir, result)
         results.append(result)

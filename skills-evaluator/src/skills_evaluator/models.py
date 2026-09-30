@@ -93,6 +93,7 @@ class RunPlan(BaseModel):
     max_sessions: int
     max_cost_usd: float
     estimated_max_cost_usd: float
+    estimated_expected_cost_usd: float = 0.0
     planned_sessions: int
 
 
@@ -157,6 +158,13 @@ class Recommendation(BaseModel):
     no_skills_recommended: bool = False
     # True when more than half the prompts are unlabeled: no recommendation is issued.
     insufficient_evidence: bool = False
+    # True when the no-skill baseline and the best bundle differ by no more than the noise floor.
+    inconclusive: bool = False
+    # The tolerance actually applied: at least one prompt's worth of score.
+    effective_tolerance: float | None = None
+    # Estimates for the sessions that ran, to compare with total_cost_usd.
+    expected_cost_usd: float = 0.0
+    worst_case_cost_usd: float = 0.0
     baseline_score: float | None = None
     scored_prompts_per_config: int = 0
     limitations: list[str]
