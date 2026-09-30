@@ -5,7 +5,25 @@ from pathlib import Path
 
 import yaml
 
+from skills_evaluator.labels import skill_categories
 from skills_evaluator.models import EvalPrompt, ProjectProfile, SkillCandidate
+
+# Questions that share a skill category's vocabulary but need no skill: an answer from
+# general knowledge. They never mention skills, so a skill that fires is a real false positive.
+NEAR_MISS_PROMPTS = {
+    "testing": "In two sentences, explain the difference between a unit test and an "
+    "integration test. Answer from general knowledge; nothing needs to be run or changed.",
+    "frontend": "In two sentences, explain the difference between CSS grid and flexbox. "
+    "Answer from general knowledge; nothing needs to be designed or built.",
+    "backend": "In two sentences, explain what an idempotent HTTP endpoint is. "
+    "Answer from general knowledge; nothing in the project needs to change.",
+    "devops": "In two sentences, explain what a blue-green deployment is. "
+    "Answer from general knowledge; nothing needs to be deployed.",
+    "docs": "In two sentences, explain the difference between a tutorial and a how-to "
+    "guide. Answer from general knowledge; no document needs to be written.",
+    "security": "In two sentences, explain what a CSRF attack is. "
+    "Answer from general knowledge; nothing needs to be reviewed or fixed.",
+}
 
 
 def _slug(value: str) -> str:
@@ -40,6 +58,16 @@ def generate_prompts(
                 capability=capability,
             )
         )
+    categories = sorted({item for skill in candidates for item in skill_categories(skill)})
+    for category in categories:
+        if category in NEAR_MISS_PROMPTS:
+            prompts.append(
+                EvalPrompt(
+                    id=f"near-miss-{category}",
+                    text=NEAR_MISS_PROMPTS[category],
+                    origin="near-miss",
+                )
+            )
     prompts.extend(
         [
             EvalPrompt(
@@ -59,26 +87,71 @@ def generate_prompts(
     return prompts
 
 
-def load_user_prompts(path: Path, candidates: list[SkillCandidate]) -> list[EvalPrompt]:
+LABEL_FIELDS = ("label", "expected_skill", "expected_skills")
+
+
+def load_prompt_file(
+    path: Path, candidates: list[SkillCandidate]
+) -> tuple[list[EvalPrompt], dict[str, dict[str, object]]]:
+    """Read the user prompt YAML.
+
+    Entries with `text` are new prompts. An entry with only an `id` of a generated prompt plus
+    label fields overrides that prompt's label, and beats the capability heuristic.
+    """
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError("User prompt file must contain a YAML list.")
     by_name = {item.name: item.id for item in candidates}
     by_id = {item.id: item.id for item in candidates}
+
+    def resolve(value: object, index: int) -> str:
+        resolved = by_id.get(str(value)) or by_name.get(str(value))
+        if not resolved:
+            raise ValueError(f"User prompt {index} names unknown skill {value!r}.")
+        return resolved
+
     prompts: list[EvalPrompt] = []
+    overrides: dict[str, dict[str, object]] = {}
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"User prompt {index} must be an object.")
         data = dict(item)
-        expected = data.get("expected_skill")
-        if expected:
-            resolved = by_id.get(str(expected)) or by_name.get(str(expected))
-            if not resolved:
-                raise ValueError(f"User prompt {index} names unknown skill {expected!r}.")
-            data["expected_skill"] = resolved
+        if data.get("expected_skill"):
+            data["expected_skill"] = resolve(data["expected_skill"], index)
+        if data.get("expected_skills"):
+            data["expected_skills"] = [resolve(value, index) for value in data["expected_skills"]]
+        if "text" not in data:
+            fields = {key: data[key] for key in LABEL_FIELDS if data.get(key)}
+            if not data.get("id") or not fields:
+                raise ValueError(
+                    f"User prompt {index} needs `text`, or the `id` of a generated prompt "
+                    "plus label fields."
+                )
+            overrides[str(data["id"])] = fields
+            continue
         data["origin"] = "user"
+        if data.get("label"):
+            data["label_source"] = "user"
         prompts.append(EvalPrompt.model_validate(data))
     ids = [item.id for item in prompts]
     if len(ids) != len(set(ids)):
         raise ValueError("User prompt IDs must be unique.")
-    return prompts
+    return prompts, overrides
+
+
+def apply_label_overrides(
+    prompts: list[EvalPrompt], overrides: dict[str, dict[str, object]]
+) -> list[EvalPrompt]:
+    by_id = {item.id: item for item in prompts}
+    for prompt_id, fields in overrides.items():
+        target = by_id.get(prompt_id)
+        if target is None:
+            raise ValueError(f"Label override names unknown prompt {prompt_id!r}.")
+        data = target.model_dump()
+        data.update({"expected_skill": None, "expected_skills": []})
+        data.update(fields)
+        if not data.get("label"):
+            data["label"] = "positive"
+        data["label_source"] = "user"
+        by_id[prompt_id] = EvalPrompt.model_validate(data)
+    return [by_id[item.id] for item in prompts]

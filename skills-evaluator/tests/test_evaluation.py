@@ -2,7 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from skills_evaluator.analysis import analyze
-from skills_evaluator.engine import AnthropicApiEngine, FakeEngine, token_cost
+from skills_evaluator.engine import (
+    AnthropicApiEngine,
+    FakeEngine,
+    system_prompt,
+    token_cost,
+)
 from skills_evaluator.models import EvalPrompt
 from skills_evaluator.planner import build_plan
 from skills_evaluator.profiler import profile_project
@@ -67,9 +72,9 @@ def test_plan_is_bounded_and_has_multiple_combination_types(tmp_path: Path) -> N
         ],
         run_root=tmp_path / "runs",
         include_anthropic=False,
-        max_sessions=40,
+        max_sessions=48,
     )
-    assert plan.planned_sessions <= 40
+    assert plan.planned_sessions <= 48
     assert {item.kind for item in plan.configurations} >= {"baseline", "singleton", "full"}
     assert plan.estimated_max_cost_usd <= plan.max_cost_usd
 
@@ -135,3 +140,13 @@ def test_api_engine_tool_loop_loads_exact_skill() -> None:
     assert result.selected_skills == [skill.id]
     assert result.answer == "Applied the relevant guidance."
     assert result.cost_usd == token_cost(engine.model, 300, 50)
+
+
+def test_system_prompt_lists_only_available_skills_and_discourages_loading() -> None:
+    profile = profile_project(FIXTURES / "project")
+    skill = load_skill(FIXTURES / "skills" / "testing", profile, "fixture", True)
+    prompt = system_prompt(profile, [skill])
+    assert "Use load_skill only when a listed skill is materially relevant" in prompt
+    assert "Do not load a skill for unrelated or simple control requests" in prompt
+    assert skill.id in prompt and skill.description in prompt
+    assert "frontend-design" not in system_prompt(profile, [skill])

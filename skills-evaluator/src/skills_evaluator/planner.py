@@ -8,9 +8,10 @@ from pathlib import Path
 import yaml
 
 from skills_evaluator.engine import session_reservation
+from skills_evaluator.labels import stamp_labels
 from skills_evaluator.models import ExperimentConfig, RunPlan
 from skills_evaluator.profiler import profile_project
-from skills_evaluator.prompts import generate_prompts, load_user_prompts
+from skills_evaluator.prompts import apply_label_overrides, generate_prompts, load_prompt_file
 from skills_evaluator.skills import discover_candidates
 
 
@@ -85,7 +86,7 @@ def build_plan(
     while candidates:
         active_count = sum(not item.blocked for item in candidates)
         generated = generate_prompts(profile, candidates)
-        user_prompts = load_user_prompts(prompt_file, candidates) if prompt_file else []
+        user_prompts = load_prompt_file(prompt_file, candidates)[0] if prompt_file else []
         prompt_count = len(generated) + len(user_prompts)
         core_config_count = active_count + 2 if active_count else 1
         if prompt_count * core_config_count <= session_limit:
@@ -103,14 +104,16 @@ def build_plan(
 
     prompts = generate_prompts(profile, candidates)
     if prompt_file:
-        user_prompts = load_user_prompts(prompt_file, candidates)
+        user_prompts, overrides = load_prompt_file(prompt_file, candidates)
         existing_ids = {item.id for item in prompts}
         duplicate_ids = existing_ids & {item.id for item in user_prompts}
         if duplicate_ids:
             raise ValueError(
                 f"User prompt IDs conflict with generated IDs: {sorted(duplicate_ids)}"
             )
+        prompts = apply_label_overrides(prompts, overrides)
         prompts.extend(user_prompts)
+    prompts = stamp_labels(prompts, candidates)
     configs = _configurations([item.id for item in candidates if not item.blocked])
     planned = len(prompts) * len(configs)
     if planned > session_limit:

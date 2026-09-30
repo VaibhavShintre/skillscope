@@ -5,6 +5,7 @@ import os
 import time
 from typing import Protocol
 
+from skills_evaluator.labels import expected_ids
 from skills_evaluator.models import EvalPrompt, ProjectProfile, SessionResult, SkillCandidate
 
 
@@ -48,7 +49,7 @@ class FakeEngine:
         skills: list[SkillCandidate],
     ) -> SessionResult:
         available = [item.id for item in skills]
-        selected = [prompt.expected_skill] if prompt.expected_skill in available else []
+        selected = [item for item in sorted(expected_ids(prompt)) if item in available]
         return SessionResult(
             session_key=session_key,
             config_id=config_id,
@@ -63,6 +64,36 @@ class FakeEngine:
             duration_ms=1,
             outcome="completed",
         )
+
+
+def system_prompt(profile: ProjectProfile, skills: list[SkillCandidate]) -> str:
+    """The exact system prompt the API harness sends, including the skill listing."""
+    metadata = [
+        {"id": item.id, "name": item.name, "description": item.description} for item in skills
+    ]
+    return (
+        "You are evaluating Agent Skills for a software project. Use load_skill only when "
+        "a listed skill is materially relevant. Do not load a skill for unrelated or simple "
+        "control requests. After loading any useful skill, answer the task concisely.\n\n"
+        f"Project profile: {profile.summary}\nAvailable skill metadata: "
+        f"{json.dumps(metadata, ensure_ascii=False)}"
+    )
+
+
+def tool_definitions(skills: list[SkillCandidate]) -> list[dict[str, object]]:
+    if not skills:
+        return []
+    return [
+        {
+            "name": "load_skill",
+            "description": "Load one available Agent Skill by its exact id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"skill_id": {"type": "string"}},
+                "required": ["skill_id"],
+            },
+        }
+    ]
 
 
 class AnthropicApiEngine:
@@ -91,30 +122,8 @@ class AnthropicApiEngine:
         input_tokens = 0
         output_tokens = 0
         skill_by_id = {item.id: item for item in skills}
-        metadata = [
-            {"id": item.id, "name": item.name, "description": item.description}
-            for item in skills
-        ]
-        system = (
-            "You are evaluating Agent Skills for a software project. Use load_skill only when "
-            "a listed skill is materially relevant. Do not load a skill for unrelated or simple "
-            "control requests. After loading any useful skill, answer the task concisely.\n\n"
-            f"Project profile: {profile.summary}\nAvailable skill metadata: "
-            f"{json.dumps(metadata, ensure_ascii=False)}"
-        )
-        tools = []
-        if skills:
-            tools.append(
-                {
-                    "name": "load_skill",
-                    "description": "Load one available Agent Skill by its exact id.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"skill_id": {"type": "string"}},
-                        "required": ["skill_id"],
-                    },
-                }
-            )
+        system = system_prompt(profile, skills)
+        tools = tool_definitions(skills)
         messages: list[dict[str, object]] = [{"role": "user", "content": prompt.text}]
         answer_parts: list[str] = []
         try:
