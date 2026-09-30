@@ -105,6 +105,24 @@ example 6.7 points on 15 prompts). The tolerance used to compare the baseline an
 therefore never smaller than one prompt: a one-prompt lead over "no skills" is reported as
 **inconclusive, gap within noise**, not as a win.
 
+## Scores, ties and the decoy control
+
+The score is **balanced**: the average of the positive-prompt score (prompts that expect a skill)
+and the negative-prompt score (prompts that should stay silent). The report shows both next to
+the headline, so a configuration that never fires scores 50% however many negative prompts a run
+has, and staying silent cannot win by default.
+
+The tolerance used to compare configurations is never below one prompt's worth of score, and a
+gap equal to it is a tie. A recommended bundle must itself lead "no skills" by more than that:
+being the smallest bundle near the best is not enough, because it can lead the baseline by only
+one prompt. If nothing does, the report says "no skills", and "inconclusive — gap within noise"
+when even the best bundle is within the noise floor.
+
+`--decoy` adds a built-in control skill with a plausible description and a useless body, plus two
+configurations (the decoy alone, and the full bundle with the decoy listed). It is never
+recommended. The report shows how often it fires (every firing is wrong), the most that merely
+listing it lifted a score, and flags any bundle whose lead over no skills is no larger than that.
+
 ## Privacy and safety
 
 The API key is read only from `ANTHROPIC_API_KEY`. It is never accepted on the

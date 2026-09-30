@@ -105,8 +105,9 @@ def test_leave_one_out_delta_is_measured_however_the_planner_deduplicated_it(
 
     recommendation = analyze_exact(plan, _results(plan))
 
-    # Dropping any one skill loses exactly one of the skill_count + 1 prompts.
-    expected = round(1 / (skill_count + 1), 4)
+    # Dropping any one skill loses one of the skill_count positive prompts: the positive score
+    # falls by 1 / skill_count, and the balanced score by half of that.
+    expected = round(1 / (2 * skill_count), 4)
     assert recommendation.recommended_count == skill_count
     for verdict in recommendation.verdicts:
         assert verdict.leave_one_out_delta == expected
@@ -210,8 +211,9 @@ def test_precision_is_per_configuration_and_counts_wrong_and_negative_firings() 
     assert set(first.precision_by_config) == {"singleton-01", "full"}
     assert first.precision_by_config == {"singleton-01": 0.2, "full": 0.2}
     assert first.precision == 0.2  # the full-bundle figure is the headline one
-    # Score: singleton-01 gets only its own positive right (1/5); full gets none (0/5).
-    assert noisy.best_score == 0.2
+    # Balanced score: singleton-01 gets its own positive right (1 of 2) and no negative, so
+    # (0.5 + 0) / 2; full gets nothing right.
+    assert noisy.best_score == 0.25
 
 
 def test_no_skills_is_recommended_when_the_baseline_beats_every_bundle(tmp_path: Path) -> None:
@@ -220,22 +222,23 @@ def test_no_skills_is_recommended_when_the_baseline_beats_every_bundle(tmp_path:
         for index in range(2)
     ]
     plan = _plan(2, extra_prompts=negatives)
-    # An over-eager model: baseline gets 3/5 (silent on negatives), every bundle scores <= 1/5.
+    # An over-eager model: the baseline is right on every negative (balanced 50%), every bundle
+    # scores at most 25%.
     recommendation = analyze_exact(plan, [_fire_everything(item) for item in _results(plan)])
 
     assert recommendation.no_skills_recommended is True
     assert recommendation.recommended_config == "baseline"
     assert recommendation.recommended_skill_ids == []
     assert recommendation.recommended_count == 0
-    assert recommendation.baseline_score == 0.6
-    assert recommendation.best_score == 0.2
-    assert recommendation.recommended_score == 0.6
+    assert recommendation.baseline_score == 0.5
+    assert recommendation.best_score == 0.25
+    assert recommendation.recommended_score == 0.5
     assert not any(item.selected for item in recommendation.verdicts)
     assert all(item.verdict == "conflicting" for item in recommendation.verdicts)
 
     report = markdown_report(plan, recommendation)
     assert "**Recommendation: use no skills.**" in report
-    assert "No-skill baseline score: **60.0%**" in report
+    assert "No-skill baseline score: **50.0%** (positive 0.0%, negative 100.0%)" in report
     assert "Recommended bundle: **No skills**" in report
     write_reports(tmp_path, plan, recommendation)
     assert "use no skills" in (tmp_path / "report.html").read_text(encoding="utf-8")
@@ -259,19 +262,23 @@ def test_a_bundle_that_beats_the_baseline_is_still_recommended() -> None:
     recommendation = analyze_exact(plan, _results(plan))
     assert recommendation.no_skills_recommended is False
     assert recommendation.recommended_count == 2
-    assert recommendation.baseline_score == round(1 / 3, 4)
+    assert recommendation.baseline_score == 0.5  # silent: no positive, every negative
 
 
 def test_report_warns_how_few_prompts_back_each_score() -> None:
-    plan = _plan(2)  # two skill prompts plus one control: 3 labeled prompts per configuration
+    plan = _plan(2)  # two skill prompts (positive) plus one control (negative) per configuration
     recommendation = analyze_exact(plan, _results(plan))
     assert recommendation.scored_prompts_per_config == 3
+    assert recommendation.positive_prompts_per_config == 2
+    assert recommendation.negative_prompts_per_config == 1
     assert any(
-        "only 3 labeled prompts (1 prompt = 33.3 points)" in item
-        and "not statistically significant" in item
+        "2 positive and 1 negative labeled prompts" in item
+        and "25.0 points" in item
+        and "50.0" in item
+        and "treated as a tie" in item
         for item in recommendation.limitations
     )
-    assert "1 prompt = 33.3 points" in markdown_report(plan, recommendation)
+    assert "2 positive and 1 negative labeled prompts" in markdown_report(plan, recommendation)
 
 
 def _with_categories(plan: RunPlan, categories: dict[int, list[str]]) -> RunPlan:
@@ -424,69 +431,6 @@ def test_plan_output_marks_auto_discovered_skills(capsys, tmp_path: Path) -> Non
     assert any("skill-2" in line and "auto-discovered" in line for line in lines)
 
 
-def _padded(skill_count: int, padding: int) -> RunPlan:
-    controls = [
-        EvalPrompt(id=f"pad-{index}", text="x", origin="control") for index in range(padding)
-    ]
-    return _plan(skill_count, extra_prompts=controls)
-
-
-def test_a_one_prompt_lead_over_no_skills_is_inconclusive(tmp_path: Path) -> None:
-    plan = _padded(1, 10)  # 12 prompts per config; the skill wins exactly one (its own positive)
-    recommendation = analyze(plan, _results(plan))
-
-    assert recommendation.scored_prompts_per_config == 12
-    assert recommendation.effective_tolerance == round(1 / 12, 4)
-    assert recommendation.baseline_score == round(11 / 12, 4)
-    assert recommendation.best_score == 1.0
-    assert recommendation.no_skills_recommended is True
-    assert recommendation.inconclusive is True
-    assert recommendation.recommended_count == 0
-    assert recommendation.verdicts[0].verdict == "no_lift"
-    assert "beyond the noise floor" in recommendation.verdicts[0].reasons[0]
-
-    report = markdown_report(plan, recommendation)
-    assert "**Inconclusive — gap within noise.**" in report
-    assert "a gap of 8.3 points" in report
-    assert "one prompt = 8.3 points" in report
-    assert "Recommended bundle: **No skills (inconclusive — gap within noise)**" in report
-    assert "Noise tolerance: **8.3%**" in report
-    write_reports(tmp_path, plan, recommendation)
-    saved = json.loads((tmp_path / "recommendation.json").read_text(encoding="utf-8"))
-    assert saved["inconclusive"] is True and saved["effective_tolerance"] == 0.0833
-    assert "Inconclusive" in (tmp_path / "report.html").read_text(encoding="utf-8")
-
-    # The same run with the floor switched off would have recommended the skill.
-    assert analyze(plan, _results(plan), noise_prompts=0).recommended_count == 1
-
-
-def test_a_two_prompt_lead_is_a_real_gap() -> None:
-    plan = _padded(2, 10)  # 13 prompts per config; the baseline misses both positives
-    recommendation = analyze(plan, _results(plan))
-    assert recommendation.baseline_score == round(11 / 13, 4)
-    assert recommendation.no_skills_recommended is False
-    assert recommendation.inconclusive is False
-    # Singletons trail the full bundle by one prompt, which is a tie, so the smaller bundle wins.
-    assert recommendation.recommended_count == 1
-    assert "Inconclusive" not in markdown_report(plan, recommendation)
-
-
-def test_baseline_far_ahead_is_a_clear_no_skills_not_inconclusive() -> None:
-    negatives = [
-        EvalPrompt(id=f"neg-{index}", text="x", origin="project", label="negative")
-        for index in range(10)
-    ]
-    plan = _plan(2, extra_prompts=negatives)
-    # Every skill fires on everything: bundles fail all 10 negatives, the baseline passes them.
-    recommendation = analyze(plan, [_fire_everything(item) for item in _results(plan)])
-    assert recommendation.no_skills_recommended is True
-    assert recommendation.inconclusive is False
-    report = markdown_report(plan, recommendation)
-    assert "**Recommendation: use no skills.**" in report
-    assert "noise tolerance 7.7%" in report  # one of 13 prompts, not the configured 2%
-    assert "Inconclusive" not in report
-
-
 def test_report_compares_expected_and_actual_cost() -> None:
     plan = _plan(2)
     results = [item.model_copy(update={"cost_usd": 0.001}) for item in _results(plan)]
@@ -572,3 +516,133 @@ def test_a_rarely_firing_skill_in_the_bundle_is_marginal_and_the_report_says_so(
     assert "fired on only" in second.reasons[0]
     assert any("Marginal skills in the recommended bundle (skill-2)" in x
                for x in recommendation.limitations)
+
+
+def _grid(positives: int, negatives: int, expected: str = "skill-1", skills: int = 1) -> RunPlan:
+    """`positives` prompts that expect one skill, and `negatives` controls that expect none."""
+    prompts = [
+        EvalPrompt(id=f"want-{index}", text="x", expected_skill=expected, origin="user")
+        for index in range(positives)
+    ] + [EvalPrompt(id=f"quiet-{index}", text="x", origin="control") for index in range(negatives)]
+    return _plan(skills).model_copy(update={"prompts": prompts})
+
+
+def _lead(hits: int, size: int) -> tuple[RunPlan, list[SessionResult]]:
+    """One skill that answers only its first `hits` of `size` positives and never fires wrongly."""
+    plan = _grid(size, size)
+    results = [
+        item.model_copy(update={"selected_skills": []})
+        if item.prompt_id.startswith("want-") and int(item.prompt_id.split("-")[1]) >= hits
+        else item
+        for item in _results(plan)
+    ]
+    return plan, results
+
+
+def test_a_lead_equal_to_the_noise_floor_is_a_tie_not_a_win(tmp_path: Path) -> None:
+    plan, results = _lead(hits=1, size=5)  # positive score 1/5 -> balanced 0.6 against 0.5
+    recommendation = analyze(plan, results)
+
+    assert recommendation.noise_step == 0.1
+    assert recommendation.baseline_score == 0.5 and recommendation.best_score == 0.6
+    assert recommendation.effective_tolerance == 0.1  # exactly the lead: 0.6 - 0.5 is a tie
+    assert recommendation.no_skills_recommended is True
+    assert recommendation.inconclusive is True
+    assert recommendation.recommended_count == 0
+
+    report = markdown_report(plan, recommendation)
+    assert "**Inconclusive — gap within noise.**" in report
+    assert "a gap of 10.0 points" in report and "one prompt = up to 10.0 points" in report
+    assert "Recommended bundle: **No skills (inconclusive — gap within noise)**" in report
+    write_reports(tmp_path, plan, recommendation)
+    saved = json.loads((tmp_path / "recommendation.json").read_text(encoding="utf-8"))
+    assert saved["inconclusive"] is True and saved["noise_step"] == 0.1
+    assert "Inconclusive" in (tmp_path / "report.html").read_text(encoding="utf-8")
+
+    # With the noise floor switched off the same run would have recommended the skill.
+    assert analyze(plan, results, noise_prompts=0).recommended_count == 1
+
+
+@pytest.mark.parametrize("size", range(2, 26))
+def test_a_one_prompt_lead_is_a_tie_at_every_class_size(size: int) -> None:
+    # The lead 1 / (2 * size) equals the floor 0.5 / size in exact arithmetic, but not always
+    # in floating point; the comparison must not depend on how it rounds.
+    plan, results = _lead(hits=1, size=size)
+    tie = analyze(plan, results)
+    assert tie.inconclusive is True and tie.recommended_count == 0
+
+    plan, results = _lead(hits=2, size=size)
+    win = analyze(plan, results)
+    assert win.inconclusive is False and win.recommended_skill_ids == ["skill-1"]
+
+
+def test_a_two_prompt_lead_is_a_real_gap() -> None:
+    plan, results = _lead(hits=2, size=5)  # 0.7 against 0.5
+    recommendation = analyze(plan, results)
+    assert recommendation.recommended_skill_ids == ["skill-1"]
+    assert recommendation.no_skills_recommended is False and recommendation.inconclusive is False
+    report = markdown_report(plan, recommendation)
+    assert "Recommended bundle: **skill-1 (auto-discovered)**" in report
+    assert "Recommended score: **70.0%** (positive 40.0%, negative 100.0%)" in report
+    assert "No-skill baseline score: **50.0%** (positive 0.0%, negative 100.0%)" in report
+    assert "| singleton-01 | skill-1 | 40.0% | 100.0% | 70.0% | 70.0% |" in report
+
+
+def test_the_recommended_bundle_must_itself_beat_no_skills_not_just_the_best_one() -> None:
+    # Three positives expect skill-1 and three expect skill-2, with six controls.
+    prompts = [
+        EvalPrompt(id=f"want-a-{index}", text="x", expected_skill="skill-1", origin="user")
+        for index in range(3)
+    ] + [
+        EvalPrompt(id=f"want-b-{index}", text="x", expected_skill="skill-2", origin="user")
+        for index in range(3)
+    ] + [EvalPrompt(id=f"quiet-{index}", text="x", origin="control") for index in range(6)]
+    plan = _plan(2).model_copy(update={"prompts": prompts})
+    answered = {
+        frozenset({"skill-1"}): {"want-a-0"},
+        frozenset({"skill-1", "skill-2"}): {"want-a-0", "want-b-0"},
+        frozenset({"skill-2"}): set(),
+    }
+    results = [
+        item.model_copy(update={"selected_skills": []})
+        if item.prompt_id.startswith("want-")
+        and item.prompt_id not in answered.get(frozenset(item.available_skills), set())
+        else item
+        for item in _results(plan)
+    ]
+    recommendation = analyze(plan, results)
+    by_config = {item.id: item for item in recommendation.config_scores}
+
+    # skill-1 alone is within one prompt of the best bundle, and ahead of no skills by exactly
+    # one prompt, which is a tie. The smallest near-best bundle would have been recommended
+    # on that; the bundle that really beats no skills is the pair.
+    assert by_config["baseline"].score == 0.5
+    assert by_config["singleton-01"].score == round(7 / 12, 4)
+    assert by_config["full"].score == round(2 / 3, 4)
+    assert recommendation.effective_tolerance == round(1 / 12, 4)
+    assert recommendation.recommended_skill_ids == ["skill-1", "skill-2"]
+    assert recommendation.recommended_score - recommendation.baseline_score > 1 / 12
+
+
+def test_a_clear_baseline_win_is_not_inconclusive() -> None:
+    # Six positives expect a skill that is not in the run; skills fire on everything anyway.
+    plan = _grid(6, 6, expected="skill-9", skills=2)
+    recommendation = analyze(plan, [_fire_everything(item) for item in _results(plan)])
+    assert recommendation.no_skills_recommended is True
+    assert recommendation.inconclusive is False
+    report = markdown_report(plan, recommendation)
+    assert "**Recommendation: use no skills.**" in report
+    assert "noise tolerance 8.3%" in report
+    assert "Inconclusive" not in report
+
+
+def test_staying_silent_scores_fifty_percent_however_many_negatives_there_are() -> None:
+    plan = _grid(2, 30)
+    silent = [item.model_copy(update={"selected_skills": []}) for item in _results(plan)]
+    recommendation = analyze_exact(plan, silent)
+    baseline = next(item for item in recommendation.config_scores if item.id == "baseline")
+
+    assert (baseline.positive_score, baseline.negative_score) == (0.0, 1.0)
+    assert baseline.score == 0.5  # not the 94% of prompts a plain accuracy would credit
+    assert baseline.accuracy == round(30 / 32, 4)
+    assert recommendation.inconclusive is True

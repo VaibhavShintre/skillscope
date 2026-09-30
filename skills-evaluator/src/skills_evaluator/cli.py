@@ -11,6 +11,7 @@ import typer
 from skills_evaluator import __version__
 from skills_evaluator.analysis import analyze
 from skills_evaluator.costs import estimate_session
+from skills_evaluator.decoy import build_decoy
 from skills_evaluator.engine import AnthropicApiEngine, FakeEngine
 from skills_evaluator.labels import summarize_labels
 from skills_evaluator.models import Recommendation
@@ -41,6 +42,7 @@ def _make_plan(
     model: str,
     seed: int,
     prompts: Path | None,
+    decoy: bool = False,
 ):
     out.mkdir(parents=True, exist_ok=True)
     return build_plan(
@@ -54,6 +56,7 @@ def _make_plan(
         model=model,
         seed=seed,
         prompt_file=prompts,
+        decoy=decoy,
     )
 
 
@@ -85,7 +88,11 @@ def _print_plan(plan, run_dir: Path) -> None:
         )
     for candidate in plan.candidates:
         label = "BLOCKED" if candidate.blocked else f"fit {candidate.relevance:.0%}"
-        origin = "" if candidate.user_requested else ", auto-discovered"
+        origin = (
+            ", built-in decoy control"
+            if candidate.decoy
+            else "" if candidate.user_requested else ", auto-discovered"
+        )
         typer.echo(f"  - {candidate.name}: {label} ({candidate.source}{origin})")
 
 
@@ -105,6 +112,10 @@ def _execute(run_dir: Path, fake: bool) -> Recommendation:
     if current_profile.content_hash != plan.project.content_hash:
         raise ValueError("The target project changed after planning; create a new run.")
     for candidate in plan.candidates:
+        if candidate.decoy:
+            if candidate.content_hash != build_decoy().content_hash:
+                raise ValueError("The built-in decoy skill changed after planning.")
+            continue
         current = load_skill(
             Path(candidate.source_path), plan.project, candidate.source, candidate.user_requested
         )
@@ -172,6 +183,11 @@ def plan_command(
     model: str = typer.Option("claude-haiku-4-5-20251001"),
     seed: int = typer.Option(1729),
     prompts: Path | None = typer.Option(None, exists=True, dir_okay=False),
+    decoy: bool = typer.Option(
+        False,
+        "--decoy/--no-decoy",
+        help="Add a built-in useless skill as a control and report how often it fires.",
+    ),
 ) -> None:
     """Profile a project and create a free, reviewable experiment plan."""
     try:
@@ -186,6 +202,7 @@ def plan_command(
             model,
             seed,
             prompts,
+            decoy,
         )
     except (OSError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
@@ -206,6 +223,11 @@ def evaluate(
     model: str = typer.Option("claude-haiku-4-5-20251001"),
     seed: int = typer.Option(1729),
     prompts: Path | None = typer.Option(None, exists=True, dir_okay=False),
+    decoy: bool = typer.Option(
+        False,
+        "--decoy/--no-decoy",
+        help="Add a built-in useless skill as a control and report how often it fires.",
+    ),
 ) -> None:
     """Plan and execute a bounded skill-combination evaluation."""
     try:
@@ -220,6 +242,7 @@ def evaluate(
             model,
             seed,
             prompts,
+            decoy,
         )
         _print_plan(plan, run_dir)
         if not fake:
