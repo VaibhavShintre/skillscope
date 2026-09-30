@@ -6,20 +6,42 @@ from pathlib import Path
 from skills_evaluator.models import Recommendation, RunPlan
 
 
+def _pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1%}"
+
+
 def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
     names = {item.id: item.name for item in plan.candidates}
     bundle = [names.get(item, item) for item in recommendation.recommended_skill_ids]
-    lines = [
-        f"# Skills Evaluator report: {plan.project.name}",
-        "",
+    lines = [f"# Skills Evaluator report: {plan.project.name}", ""]
+    if recommendation.no_skills_recommended:
+        lines.extend(
+            [
+                "> **Recommendation: use no skills.** The no-skill baseline scored "
+                f"{_pct(recommendation.baseline_score)}, at least as high as the best skill "
+                f"bundle ({_pct(recommendation.best_score)}, tolerance "
+                f"{recommendation.tolerance:.0%}). None of the tested bundles improved on "
+                "having no skills.",
+                "",
+            ]
+        )
+    lines += [
         f"- Recommended number of skills: **{recommendation.recommended_count}**",
         f"- Recommended bundle: **{', '.join(bundle) if bundle else 'No skills'}**",
-        f"- Recommended score: **{recommendation.recommended_score:.1%}**",
-        f"- Best observed score: **{recommendation.best_score:.1%}**",
+        f"- Recommended score: **{_pct(recommendation.recommended_score)}**",
+        f"- No-skill baseline score: **{_pct(recommendation.baseline_score)}**",
+        f"- Best observed score: **{_pct(recommendation.best_score)}**",
         f"- Completed sessions: **{recommendation.completed_sessions}/{plan.planned_sessions}**",
         f"- Recorded cost: **${recommendation.total_cost_usd:.4f}**",
+        f"- Prompts: **{recommendation.labeling.positive_prompts} positive, "
+        f"{recommendation.labeling.negative_prompts} negative, "
+        f"{recommendation.labeling.unlabeled_prompts} unlabeled** "
+        f"({recommendation.labeling.unlabeled_sessions} sessions excluded from score and "
+        "precision)",
         "",
         "## Skill verdicts",
+        "",
+        "Precision is measured in the full bundle.",
         "",
         "| Skill | Verdict | Precision | Recall | Singleton score | Leave-one-out delta |",
         "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -27,9 +49,12 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
     for item in recommendation.verdicts:
         delta = "n/a" if item.leave_one_out_delta is None else f"{item.leave_one_out_delta:+.1%}"
         lines.append(
-            f"| {item.name} | {item.verdict} | {item.precision:.1%} | {item.recall:.1%} | "
-            f"{item.singleton_score:.1%} | {delta} |"
+            f"| {item.name} | {item.verdict} | {_pct(item.precision)} | {_pct(item.recall)} | "
+            f"{_pct(item.singleton_score)} | {delta} |"
         )
+    if recommendation.labeling.unlabeled_prompt_ids:
+        lines.extend(["", "## Unlabeled prompts", ""])
+        lines.extend(f"- {item}" for item in recommendation.labeling.unlabeled_prompt_ids)
     lines.extend(["", "## Limitations", ""])
     lines.extend(f"- {item}" for item in recommendation.limitations)
     return "\n".join(lines) + "\n"

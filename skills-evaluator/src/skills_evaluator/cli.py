@@ -11,6 +11,7 @@ import typer
 from skills_evaluator import __version__
 from skills_evaluator.analysis import analyze
 from skills_evaluator.engine import AnthropicApiEngine, FakeEngine, session_reservation
+from skills_evaluator.labels import summarize_labels
 from skills_evaluator.models import Recommendation
 from skills_evaluator.planner import build_plan
 from skills_evaluator.profiler import profile_project
@@ -59,7 +60,17 @@ def _print_plan(plan, run_dir: Path) -> None:
     typer.echo(f"Run:              {plan.run_id}")
     typer.echo(f"Project:          {plan.project.root}")
     typer.echo(f"Candidates:       {len(plan.candidates)}")
-    typer.echo(f"Prompts:          {len(plan.prompts)}")
+    labeling = summarize_labels(plan.prompts, plan.candidates)
+    typer.echo(
+        f"Prompts:          {len(plan.prompts)} ({labeling.positive_prompts} positive, "
+        f"{labeling.negative_prompts} negative, {labeling.unlabeled_prompts} unlabeled)"
+    )
+    if labeling.unlabeled_prompts:
+        typer.echo("                  unlabeled prompts are excluded from score and precision")
+    if labeling.uncategorized_skills:
+        typer.echo(
+            "                  add `category:` to: " + ", ".join(labeling.uncategorized_skills)
+        )
     typer.echo(f"Configurations:   {len(plan.configurations)}")
     typer.echo(f"Planned sessions: {plan.planned_sessions}")
     typer.echo(f"Reserved maximum: ${plan.estimated_max_cost_usd:.2f}")
@@ -68,6 +79,13 @@ def _print_plan(plan, run_dir: Path) -> None:
     for candidate in plan.candidates:
         label = "BLOCKED" if candidate.blocked else f"fit {candidate.relevance:.0%}"
         typer.echo(f"  - {candidate.name}: {label} ({candidate.source})")
+
+
+def _echo_recommendation(recommendation: Recommendation, run_dir: Path) -> None:
+    typer.echo(f"Recommended skills: {recommendation.recommended_count}")
+    if recommendation.no_skills_recommended:
+        typer.echo("No skills recommended: the no-skill baseline scored as well as any bundle.")
+    typer.echo(f"Report: {(run_dir / 'report.html').resolve()}")
 
 
 def _execute(run_dir: Path, fake: bool) -> Recommendation:
@@ -198,8 +216,7 @@ def evaluate(
         recommendation = _execute(run_dir, fake)
     except (OSError, RuntimeError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
-    typer.echo(f"Recommended skills: {recommendation.recommended_count}")
-    typer.echo(f"Report: {(run_dir / 'report.html').resolve()}")
+    _echo_recommendation(recommendation, run_dir)
 
 
 @app.command()
@@ -212,8 +229,7 @@ def resume(
         recommendation = _execute(run_dir, fake)
     except (OSError, RuntimeError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
-    typer.echo(f"Recommended skills: {recommendation.recommended_count}")
-    typer.echo(f"Report: {(run_dir / 'report.html').resolve()}")
+    _echo_recommendation(recommendation, run_dir)
 
 
 @app.command("report")

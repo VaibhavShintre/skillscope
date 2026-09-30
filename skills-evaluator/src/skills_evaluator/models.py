@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectProfile(BaseModel):
@@ -39,14 +39,39 @@ class SkillCandidate(BaseModel):
     blocked: bool = False
     user_requested: bool = False
     relevance: float = Field(default=0, ge=0, le=1)
+    categories: list[str] = Field(default_factory=list)
+
+
+LABELS = ("positive", "negative", "unlabeled")
 
 
 class EvalPrompt(BaseModel):
     id: str
     text: str
     expected_skill: str | None = None
+    expected_skills: list[str] = Field(default_factory=list)
     origin: str
     capability: str | None = None
+    # positive: some skill in the expected set should fire; negative: none should;
+    # unlabeled: unknown, so excluded from scoring. None means "not resolved yet".
+    label: str | None = None
+    label_source: str | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _known_label(cls, value: str | None) -> str | None:
+        if value is not None and value not in LABELS:
+            raise ValueError(f"label must be one of {', '.join(LABELS)}")
+        return value
+
+    @model_validator(mode="after")
+    def _label_matches_expectation(self) -> EvalPrompt:
+        expected = bool(self.expected_skill or self.expected_skills)
+        if self.label == "positive" and not expected:
+            raise ValueError(f"Prompt {self.id!r} is positive but names no expected skill.")
+        if self.label in ("negative", "unlabeled") and expected:
+            raise ValueError(f"Prompt {self.id!r} is {self.label} but names an expected skill.")
+        return self
 
 
 class ExperimentConfig(BaseModel):
@@ -88,13 +113,24 @@ class SessionResult(BaseModel):
     error: str | None = None
 
 
+class LabelSummary(BaseModel):
+    positive_prompts: int = 0
+    negative_prompts: int = 0
+    unlabeled_prompts: int = 0
+    unlabeled_prompt_ids: list[str] = Field(default_factory=list)
+    unlabeled_sessions: int = 0
+    uncategorized_skills: list[str] = Field(default_factory=list)
+
+
 class SkillVerdict(BaseModel):
     skill_id: str
     name: str
     verdict: str
-    precision: float
-    recall: float
-    singleton_score: float
+    # Precision is measured in the full bundle; None when no labeled prompt activated it.
+    precision: float | None = None
+    precision_by_config: dict[str, float | None] = Field(default_factory=dict)
+    recall: float | None = None
+    singleton_score: float | None = None
     leave_one_out_delta: float | None = None
     selected: bool
     reasons: list[str] = Field(default_factory=list)
@@ -106,12 +142,17 @@ class Recommendation(BaseModel):
     recommended_config: str
     recommended_skill_ids: list[str]
     recommended_count: int
-    best_score: float
-    recommended_score: float
+    best_score: float | None = None
+    recommended_score: float | None = None
     tolerance: float
     total_cost_usd: float
     completed_sessions: int
     verdicts: list[SkillVerdict]
+    labeling: LabelSummary = Field(default_factory=LabelSummary)
+    # True when the no-skill baseline scored at least as well as the best bundle.
+    no_skills_recommended: bool = False
+    baseline_score: float | None = None
+    scored_prompts_per_config: int = 0
     limitations: list[str]
 
 

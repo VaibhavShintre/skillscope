@@ -103,6 +103,14 @@ def load_skill(
         raise ValueError(f"Invalid skill name {name!r} in {skill_file}")
     if not description:
         raise ValueError(f"Skill description is empty in {skill_file}")
+    raw_category = metadata.get("category", metadata.get("categories")) or []
+    categories = sorted(
+        {
+            str(item).strip().lower()
+            for item in (raw_category if isinstance(raw_category, list) else [raw_category])
+            if str(item).strip()
+        }
+    )
     digest, files = _folder_hash(folder)
     findings = _security_findings(folder, raw, files)
     commit = _git_commit(folder)
@@ -121,6 +129,7 @@ def load_skill(
         blocked=any(item.severity == "block" for item in findings),
         user_requested=requested,
         relevance=_relevance(profile, name, description, raw),
+        categories=categories,
     )
 
 
