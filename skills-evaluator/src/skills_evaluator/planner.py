@@ -21,44 +21,56 @@ from skills_evaluator.prompts import apply_label_overrides, generate_prompts, lo
 from skills_evaluator.skills import discover_candidates
 
 
-def _configurations(skill_ids: list[str]) -> list[ExperimentConfig]:
-    configs = [ExperimentConfig(id="baseline", skill_ids=[], kind="baseline")]
-    configs.extend(
+def _configurations(skill_ids: list[str]) -> tuple[list[ExperimentConfig], int]:
+    """Configurations in priority order, and how many of them are required.
+
+    Required, in this order: the baseline, every singleton, the full bundle, then every
+    leave-one-out (the full bundle minus one skill). Those are what every verdict needs, so a
+    tight budget must never cut them. Greedy prefixes and pairs come after. Duplicate skill
+    sets are dropped, keeping the earliest, which is why a leave-one-out that equals a
+    singleton (2 skills) is not planned twice.
+    """
+    required = [ExperimentConfig(id="baseline", skill_ids=[], kind="baseline")]
+    required.extend(
         ExperimentConfig(id=f"singleton-{index:02d}", skill_ids=[skill_id], kind="singleton")
         for index, skill_id in enumerate(skill_ids, start=1)
     )
-    if not skill_ids:
-        return configs
-    configs.append(ExperimentConfig(id="full", skill_ids=skill_ids, kind="full"))
-    for size in range(2, min(8, len(skill_ids)) + 1):
-        configs.append(
-            ExperimentConfig(
-                id=f"greedy-prefix-{size:02d}", skill_ids=skill_ids[:size], kind="greedy"
+    extras: list[ExperimentConfig] = []
+    if skill_ids:
+        required.append(ExperimentConfig(id="full", skill_ids=skill_ids, kind="full"))
+        if len(skill_ids) > 1:
+            required.extend(
+                ExperimentConfig(
+                    id=f"without-{index:02d}",
+                    skill_ids=[item for item in skill_ids if item != skill_id],
+                    kind="leave-one-out",
+                )
+                for index, skill_id in enumerate(skill_ids, start=1)
             )
-        )
-    if len(skill_ids) > 1:
+        for size in range(2, min(8, len(skill_ids)) + 1):
+            extras.append(
+                ExperimentConfig(
+                    id=f"greedy-prefix-{size:02d}", skill_ids=skill_ids[:size], kind="greedy"
+                )
+            )
         pair_limit = min(4, len(skill_ids))
-        configs.extend(
-            ExperimentConfig(
-                id=f"pair-{left + 1:02d}-{right + 1:02d}",
-                skill_ids=[skill_ids[left], skill_ids[right]],
-                kind="pair",
+        if len(skill_ids) > 1:
+            extras.extend(
+                ExperimentConfig(
+                    id=f"pair-{left + 1:02d}-{right + 1:02d}",
+                    skill_ids=[skill_ids[left], skill_ids[right]],
+                    kind="pair",
+                )
+                for left in range(pair_limit)
+                for right in range(left + 1, pair_limit)
             )
-            for left in range(pair_limit)
-            for right in range(left + 1, pair_limit)
-        )
-        configs.extend(
-            ExperimentConfig(
-                id=f"without-{index:02d}",
-                skill_ids=[item for item in skill_ids if item != skill_id],
-                kind="leave-one-out",
-            )
-            for index, skill_id in enumerate(skill_ids, start=1)
-        )
     unique: dict[tuple[str, ...], ExperimentConfig] = {}
-    for config in configs:
+    for config in required:
         unique.setdefault(tuple(config.skill_ids), config)
-    return list(unique.values())
+    required_count = len(unique)
+    for config in extras:
+        unique.setdefault(tuple(config.skill_ids), config)
+    return list(unique.values()), required_count
 
 
 def _config_costs(
@@ -94,13 +106,15 @@ def build_plan(
         include_anthropic,
         maximum_candidates,
     )
+    dropped: list[str] = []
     while candidates:
         active = [item for item in candidates if not item.blocked]
         by_id = {item.id: item for item in candidates}
         drafts = generate_prompts(profile, candidates)
         if prompt_file:
             drafts += load_prompt_file(prompt_file, candidates)[0]
-        core = _configurations([item.id for item in active])[: len(active) + 2 if active else 1]
+        ordered, required_count = _configurations([item.id for item in active])
+        core = ordered[:required_count]
         core_worst = sum(_config_costs(model, profile, item, drafts, by_id)[0] for item in core)
         if len(drafts) * len(core) <= max_sessions and core_worst <= max_cost_usd:
             break
@@ -109,11 +123,12 @@ def build_plan(
         )
         if removable is None:
             raise ValueError(
-                "The session/cost cap cannot cover baseline, singleton, and full tests for all "
-                "explicitly requested skills. Increase --cost-cap/--max-sessions or send fewer "
-                "skills."
+                "The session/cost cap cannot cover the baseline, singleton, full, and "
+                "leave-one-out tests for all explicitly requested skills. Increase "
+                "--cost-cap/--max-sessions or send fewer skills."
             )
         candidates.remove(removable)
+        dropped.append(removable.name)
 
     prompts = generate_prompts(profile, candidates)
     if prompt_file:
@@ -129,10 +144,10 @@ def build_plan(
     prompts = stamp_labels(prompts, candidates)
     by_id = {item.id: item for item in candidates}
     active_ids = [item.id for item in candidates if not item.blocked]
-    all_configs = _configurations(active_ids)
-    core_count = len(active_ids) + 2 if active_ids else 1
-    # Keep configurations in order until the cost cap (on the worst case) or the session cap
-    # would be exceeded, but never fewer than the core baseline/singleton/full set.
+    all_configs, core_count = _configurations(active_ids)
+    # Keep configurations in priority order until the cost cap (on the worst case) or the
+    # session cap would be exceeded, but never fewer than the required set (baseline,
+    # singletons, full, leave-one-outs).
     configs: list[ExperimentConfig] = []
     worst_total = expected_total = 0.0
     for index, config in enumerate(all_configs):
@@ -164,6 +179,7 @@ def build_plan(
         estimated_max_cost_usd=round(worst_total, 6),
         estimated_expected_cost_usd=round(expected_total, 6),
         planned_sessions=planned,
+        dropped_candidates=dropped,
     )
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)

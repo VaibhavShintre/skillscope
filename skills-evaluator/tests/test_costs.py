@@ -151,10 +151,12 @@ def test_a_three_skill_plan_fits_every_unique_configuration_under_three_dollars(
         max_cost_usd=3.0,
     )
     assert len(plan.candidates) == 3
-    # baseline, 3 singletons, full, greedy-02, pair-01-03 and pair-02-03: the planner drops the
-    # duplicate skill sets, so the "without-N" configs are the pairs and there are 8, not 10.
+    # baseline, 3 singletons, full and the 3 leave-one-outs (the pairs): the planner drops the
+    # duplicate skill sets, so there are 8 unique configurations, not 10.
     assert len(plan.configurations) == 8
-    assert {item.kind for item in plan.configurations} >= {"baseline", "full", "greedy", "pair"}
+    kinds = [item.kind for item in plan.configurations]
+    assert kinds.count("leave-one-out") == 3
+    assert {"baseline", "singleton", "full"} <= set(kinds)
     assert plan.estimated_max_cost_usd <= 3.0
 
 

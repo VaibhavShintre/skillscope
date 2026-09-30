@@ -78,6 +78,11 @@ def _print_plan(plan, run_dir: Path) -> None:
     typer.echo(f"Worst-case bound: ${plan.estimated_max_cost_usd:.2f} (what the cap is held to)")
     typer.echo(f"Hard cost cap:    ${plan.max_cost_usd:.2f}")
     typer.echo(f"Artifacts:        {run_dir.resolve()}")
+    if plan.dropped_candidates:
+        typer.echo(
+            "Dropped to fit the caps: " + ", ".join(plan.dropped_candidates)
+            + " (the required baseline, singleton, full and leave-one-out tests come first)"
+        )
     for candidate in plan.candidates:
         label = "BLOCKED" if candidate.blocked else f"fit {candidate.relevance:.0%}"
         origin = "" if candidate.user_requested else ", auto-discovered"

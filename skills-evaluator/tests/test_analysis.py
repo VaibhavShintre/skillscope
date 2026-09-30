@@ -49,7 +49,7 @@ def _plan(
     ]
     prompts.append(EvalPrompt(id="control", text="x", origin="control"))
     prompts.extend(extra_prompts or [])
-    configs: list[ExperimentConfig] = _configurations([item.id for item in candidates])
+    configs: list[ExperimentConfig] = _configurations([item.id for item in candidates])[0]
     if keep_configs is not None:
         configs = configs[:keep_configs]
     return RunPlan(
@@ -90,10 +90,10 @@ def _results(plan: RunPlan) -> list[SessionResult]:
 @pytest.mark.parametrize(
     ("skill_count", "surviving_kinds"),
     [
-        # The planner drops duplicate skill sets, so with few skills every "without-N"
-        # config collapses into a singleton, pair or greedy config of the same skills.
+        # The planner plans the leave-one-outs right after the full bundle and drops duplicate
+        # skill sets, so with two skills they collapse into the singletons already planned.
         (2, set()),
-        (3, set()),
+        (3, {"leave-one-out"}),
         (4, {"leave-one-out"}),
     ],
 )
@@ -498,3 +498,77 @@ def test_report_compares_expected_and_actual_cost() -> None:
     assert f"expected ${recommendation.expected_cost_usd:.4f}" in report
     assert f"worst-case bound ${recommendation.worst_case_cost_usd:.4f}" in report
     assert "of expected and" in report and "of the bound" in report
+
+
+def _results_where(plan: RunPlan, wrong: dict[frozenset[str], list[str]]) -> list[SessionResult]:
+    """An ideal router, except in the named configurations (by skill set), where a skill fires
+    on the listed negative prompts. Lets a test dictate each configuration's score."""
+    out = []
+    for item in _results(plan):
+        fired = item.selected_skills
+        noise = wrong.get(frozenset(item.available_skills), [])
+        if item.prompt_id in noise:
+            fired = [item.available_skills[-1]]
+        out.append(item.model_copy(update={"selected_skills": fired}))
+    return out
+
+
+def test_a_skill_outside_the_bundle_with_a_large_leave_one_out_is_contested_not_redundant() -> None:
+    # Six prompts expect skill-1 and six controls should stay silent; nothing expects 2 or 3.
+    prompts = [
+        EvalPrompt(id=f"want-{index}", text="x", expected_skill="skill-1", origin="user")
+        for index in range(6)
+    ] + [EvalPrompt(id=f"quiet-{index}", text="x", origin="control") for index in range(6)]
+    plan = _plan(3).model_copy(update={"prompts": prompts})
+    # Skill-2 fires on three controls, but only when skills 1 and 2 are listed together. So the
+    # full bundle and skill-1 alone are perfect, while "full minus skill-3" is not.
+    results = _results_where(
+        plan, {frozenset({"skill-1", "skill-2"}): ["quiet-0", "quiet-1", "quiet-2"]}
+    )
+    recommendation = analyze(plan, results)
+
+    # The smallest bundle within the noise floor of the best leaves skill-3 out...
+    assert recommendation.recommended_skill_ids == ["skill-1"]
+    third = next(item for item in recommendation.verdicts if item.skill_id == "skill-3")
+    # ...yet removing skill-3 from the full bundle costs 3 of 12 prompts.
+    assert third.leave_one_out_delta == 0.25
+    assert third.verdict == "contested"
+    assert "evidence conflicts" in third.reasons[0]
+    # Skill-2's removal changes nothing and nothing expects it, so it is not contested.
+    second = next(item for item in recommendation.verdicts if item.skill_id == "skill-2")
+    assert second.leave_one_out_delta == 0.0
+    assert second.verdict == "unverified"
+
+
+def test_redundant_requires_a_measured_leave_one_out() -> None:
+    plan = _plan(3, keep_configs=5)  # baseline, 3 singletons, full: no leave-one-out planned
+    recommendation = analyze(plan, _results(plan))
+    assert {item.leave_one_out_delta for item in recommendation.verdicts} == {None}
+    assert "redundant" not in {item.verdict for item in recommendation.verdicts}
+
+
+def test_a_rarely_firing_skill_in_the_bundle_is_marginal_and_the_report_says_so() -> None:
+    plan = _plan(
+        2,
+        extra_prompts=[
+            EvalPrompt(id=f"more-{index}", text="x", expected_skill="skill-2", origin="user")
+            for index in range(3)
+        ],
+    )
+    # Skill-2 fires on its first expected prompt only; skill-1 over-fires on the control when it
+    # is alone, so the bundle with the quiet skill-2 scores best.
+    results = []
+    for item in _results_where(plan, {frozenset({"skill-1"}): ["control"]}):
+        if item.prompt_id.startswith("more-"):
+            item = item.model_copy(update={"selected_skills": []})
+        results.append(item)
+    recommendation = analyze_exact(plan, results)
+
+    assert recommendation.recommended_skill_ids == ["skill-1", "skill-2"]
+    first, second = recommendation.verdicts
+    assert first.verdict != "marginal"
+    assert second.verdict == "marginal"
+    assert second.recall is not None and second.recall < 0.5
+    assert "fired on only" in second.reasons[0]
+    assert any("Marginal skills in the recommended bundle (skill-2)" in x
+               for x in recommendation.limitations)

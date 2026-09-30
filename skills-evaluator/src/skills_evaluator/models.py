@@ -95,6 +95,8 @@ class RunPlan(BaseModel):
     estimated_max_cost_usd: float
     estimated_expected_cost_usd: float = 0.0
     planned_sessions: int
+    # Auto-discovered skills the planner left out because the caps could not cover them.
+    dropped_candidates: list[str] = Field(default_factory=list)
 
 
 class SessionResult(BaseModel):
