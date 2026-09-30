@@ -171,6 +171,9 @@ class SkillVerdict(BaseModel):
     recall: float | None = None
     singleton_score: float | None = None
     leave_one_out_delta: float | None = None
+    # For a skill in the recommended bundle: the recommended bundle's score minus the score of
+    # that bundle without the skill (the baseline, for a one-skill bundle), when it was measured.
+    bundle_delta: float | None = None
     selected: bool
     reasons: list[str] = Field(default_factory=list)
 

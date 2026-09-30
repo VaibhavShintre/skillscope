@@ -234,7 +234,8 @@ def test_no_skills_is_recommended_when_the_baseline_beats_every_bundle(tmp_path:
     assert recommendation.best_score == 0.25
     assert recommendation.recommended_score == 0.5
     assert not any(item.selected for item in recommendation.verdicts)
-    assert all(item.verdict == "conflicting" for item in recommendation.verdicts)
+    # Every skill fires on everything, so dropping any one from the full bundle helps it.
+    assert {item.verdict for item in recommendation.verdicts} == {"harmful"}
 
     report = markdown_report(plan, recommendation)
     assert "**Recommendation: use no skills.**" in report
@@ -646,3 +647,85 @@ def test_staying_silent_scores_fifty_percent_however_many_negatives_there_are() 
     assert baseline.score == 0.5  # not the 94% of prompts a plain accuracy would credit
     assert baseline.accuracy == round(30 / 32, 4)
     assert recommendation.inconclusive is True
+
+
+def test_a_skill_that_hurts_the_full_bundle_is_harmful_not_redundant() -> None:
+    # Six positives expect skill-1, six controls should stay silent. Skill-3 fires wrongly on
+    # three controls, but only when all three skills are listed: the full bundle suffers, and
+    # "full minus skill-3" (skills 1 and 2) is perfect.
+    plan = _grid(6, 6, skills=3)
+    results = _results_where(
+        plan, {frozenset({"skill-1", "skill-2", "skill-3"}): ["quiet-0", "quiet-1", "quiet-2"]}
+    )
+    recommendation = analyze(plan, results)
+
+    assert recommendation.recommended_skill_ids == ["skill-1"]
+    third = next(item for item in recommendation.verdicts if item.skill_id == "skill-3")
+    assert third.leave_one_out_delta == -0.25  # the full bundle improves by 25 points
+    assert third.verdict == "harmful"
+    assert "raised the score by 25.0%" in third.reasons[0]
+    assert any("Leave-one-out deltas are measured against the full bundle" in x
+               for x in recommendation.limitations)
+
+
+def test_a_recommended_skill_that_hurts_the_full_bundle_is_contested_not_useful() -> None:
+    # Two positives expect skill-1 and four expect skill-2, with six controls. Skill-1 fires
+    # wrongly on four controls only in the full bundle, so "full minus skill-1" beats the full
+    # bundle even though skill-1 is needed in the recommended pair.
+    prompts = [
+        EvalPrompt(id=f"want-a-{index}", text="x", expected_skill="skill-1", origin="user")
+        for index in range(2)
+    ] + [
+        EvalPrompt(id=f"want-b-{index}", text="x", expected_skill="skill-2", origin="user")
+        for index in range(4)
+    ] + [EvalPrompt(id=f"quiet-{index}", text="x", origin="control") for index in range(6)]
+    plan = _plan(3).model_copy(update={"prompts": prompts})
+    full = frozenset({"skill-1", "skill-2", "skill-3"})
+    noisy = {f"quiet-{index}" for index in range(4)}
+    results = [
+        item.model_copy(update={"selected_skills": ["skill-1"]})
+        if frozenset(item.available_skills) == full and item.prompt_id in noisy
+        else item
+        for item in _results(plan)
+    ]
+    recommendation = analyze(plan, results)
+
+    assert recommendation.recommended_skill_ids == ["skill-1", "skill-2"]
+    first = next(item for item in recommendation.verdicts if item.skill_id == "skill-1")
+    assert first.leave_one_out_delta < -0.1
+    assert first.verdict == "contested"
+    assert "In the recommended bundle" in first.reasons[0]
+    # Against the recommended bundle itself, skill-1 clearly earns its place.
+    assert first.bundle_delta is not None and first.bundle_delta > 0.15
+
+
+def test_delta_in_the_recommended_bundle_compares_it_with_the_bundle_without_the_skill() -> None:
+    plan, results = _lead(hits=3, size=5)  # one skill; the recommended bundle is that skill
+    recommendation = analyze(plan, results)
+    only = recommendation.verdicts[0]
+    # No skills is the bundle without it: the lead over the baseline, (0.6 + 1) / 2 - 0.5.
+    assert only.bundle_delta == 0.3
+    assert "| +30.0% |" in markdown_report(plan, recommendation)
+
+
+def test_a_skill_the_full_bundle_does_not_need_is_redundant_with_an_accurate_reason() -> None:
+    # Positives accept either skill; every configuration answers with the first one it has.
+    prompts = [
+        EvalPrompt(
+            id=f"want-{index}", text="x", expected_skills=["skill-1", "skill-2"], origin="user"
+        )
+        for index in range(6)
+    ] + [EvalPrompt(id=f"quiet-{index}", text="x", origin="control") for index in range(6)]
+    plan = _plan(2).model_copy(update={"prompts": prompts})
+    results = []
+    for item in _results(plan):
+        first = item.available_skills[:1]
+        wanted = item.prompt_id.startswith("want-")
+        results.append(item.model_copy(update={"selected_skills": first if wanted else []}))
+    recommendation = analyze(plan, results)
+
+    assert recommendation.recommended_skill_ids == ["skill-1"]
+    second = next(item for item in recommendation.verdicts if item.skill_id == "skill-2")
+    assert second.leave_one_out_delta == 0.0
+    assert second.verdict == "redundant"
+    assert "too small to count as an effect" in second.reasons[0]

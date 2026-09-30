@@ -118,6 +118,11 @@ being the smallest bundle near the best is not enough, because it can lead the b
 one prompt. If nothing does, the report says "no skills", and "inconclusive — gap within noise"
 when even the best bundle is within the noise floor.
 
+A skill's **leave-one-out delta** is the full bundle's score minus the score without it. The full
+bundle can be a poor reference (a run where everything fires scores badly), so a negative delta
+beyond the noise floor is reported as `harmful` (or `contested` for a skill in the recommended
+bundle), and each recommended skill also gets a **delta in the recommended bundle**.
+
 `--decoy` adds a built-in control skill with a plausible description and a useless body, plus two
 configurations (the decoy alone, and the full bundle with the decoy listed). It is never
 recommended. The report shows how often it fires (every firing is wrong), the most that merely

@@ -192,6 +192,13 @@ def analyze(
             and delta >= ESSENTIAL_DELTA - EPSILON
         )
 
+    def harmful(delta: float | None) -> bool:
+        """Removing the skill raised the full bundle's score by more than the noise floor."""
+        return delta is not None and meaningful(-delta)
+
+    recommended_set = frozenset(recommended.skill_ids) if recommended else frozenset()
+    recommended_score_now = score_by_skills.get(recommended_set) if recommended else None
+
     verdicts: list[SkillVerdict] = []
     for skill in plan.candidates:
         if skill.decoy:
@@ -244,6 +251,18 @@ def analyze(
             score_by_skills.get(full_ids - {skill.id}) if skill.id in full_ids else None
         )
         delta = full_score - without if full_score is not None and without is not None else None
+        # The same question asked of the recommended bundle instead of the full one, which can
+        # be a poor reference: a full bundle that scores badly makes every removal look good.
+        bundle_without = (
+            score_by_skills.get(recommended_set - {skill.id})
+            if skill.id in recommended_set
+            else None
+        )
+        bundle_delta = (
+            recommended_score_now - bundle_without
+            if recommended_score_now is not None and bundle_without is not None
+            else None
+        )
         reasons: list[str] = []
         if skill.blocked:
             verdict = "unsafe"
@@ -270,6 +289,12 @@ def analyze(
                 "The full bundle without this skill was not measured, so its marginal "
                 "value is unknown."
             )
+        elif skill.id in selected_ids and harmful(delta):
+            verdict = "contested"
+            reasons.append(
+                f"In the recommended bundle, but removing it from the full bundle raised the "
+                f"score by {-delta:.1%}, more than the noise floor, so the evidence conflicts."
+            )
         elif skill.id in selected_ids and meaningful(delta):
             verdict = "essential"
             reasons.append(f"Removing it reduced the full-bundle score by {delta:.1%}.")
@@ -283,6 +308,12 @@ def analyze(
             reasons.append(
                 f"Removing it from the full bundle cost {delta:.1%}, but a smaller bundle "
                 "without it scored within the noise floor of the best, so the evidence conflicts."
+            )
+        elif harmful(delta):
+            verdict = "harmful"
+            reasons.append(
+                f"Removing it from the full bundle raised the score by {-delta:.1%}, more than "
+                "the noise floor: listed with the others it costs more than it adds."
             )
         elif recall is None:
             verdict = "unverified"
@@ -308,8 +339,8 @@ def analyze(
         else:
             verdict = "redundant"
             reasons.append(
-                f"Removing it from the full bundle changed the score by {delta:+.1%}, within "
-                "the noise floor, and the smallest near-best bundle does not need it."
+                f"Removing it from the full bundle changed the score by {delta:+.1%}, too small "
+                "to count as an effect, and the smallest near-best bundle does not need it."
             )
         verdicts.append(
             SkillVerdict(
@@ -331,6 +362,9 @@ def analyze(
                 ),
                 leave_one_out_delta=(
                     None if delta is None or insufficient else round(delta, 4)
+                ),
+                bundle_delta=(
+                    None if bundle_delta is None or insufficient else round(bundle_delta, 4)
                 ),
                 selected=skill.id in selected_ids,
                 reasons=reasons,
@@ -434,6 +468,18 @@ def analyze(
             "Marginal skills in the recommended bundle (" + ", ".join(marginal) + ") fired on "
             f"under {MARGINAL_RECALL:.0%} of the prompts that expected them; the bundle's score "
             "may come from other skills firing less rather than from their own activations."
+        )
+    if (
+        not insufficient
+        and full_score is not None
+        and best_score is not None
+        and best_score - full_score > effective_tolerance + EPSILON
+    ):
+        limitations.append(
+            f"Leave-one-out deltas are measured against the full bundle, which scored "
+            f"{full_score:.1%}, {(best_score - full_score) * 100:.1f} points below the best "
+            "bundle, so they say little about the recommended bundle. The delta in the "
+            "recommended bundle measures each recommended skill against that bundle instead."
         )
     if decoy_report and decoy_report.fired:
         limitations.append(

@@ -176,15 +176,16 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         )
     lines += [
         "| Skill | Origin | Verdict | Precision | Recall | Singleton score | "
-        "Leave-one-out delta |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+        "Leave-one-out delta (full bundle) | Delta in recommended bundle |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in recommendation.verdicts:
         delta = "n/a" if item.leave_one_out_delta is None else f"{item.leave_one_out_delta:+.1%}"
+        inside = "n/a" if item.bundle_delta is None else f"{item.bundle_delta:+.1%}"
         origin = "auto-discovered" if item.auto_discovered else "requested"
         lines.append(
             f"| {item.name} | {origin} | {item.verdict} | {_pct(item.precision)} | "
-            f"{_pct(item.recall)} | {_pct(item.singleton_score)} | {delta} |"
+            f"{_pct(item.recall)} | {_pct(item.singleton_score)} | {delta} | {inside} |"
         )
     if recommendation.config_scores:
         lines += [
