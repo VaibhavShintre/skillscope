@@ -40,6 +40,8 @@ class SkillCandidate(BaseModel):
     user_requested: bool = False
     relevance: float = Field(default=0, ge=0, le=1)
     categories: list[str] = Field(default_factory=list)
+    # The built-in control skill: never recommended, only measured.
+    decoy: bool = False
 
 
 LABELS = ("positive", "negative", "unlabeled")
@@ -127,6 +129,36 @@ class LabelSummary(BaseModel):
     unjudged_activations: int = 0
 
 
+class ConfigScore(BaseModel):
+    id: str
+    kind: str
+    skill_names: list[str] = Field(default_factory=list)
+    # Rates over labeled sessions of each kind; the score is their average, so a configuration
+    # that stays silent scores 50% however many negative prompts there are.
+    positive_score: float | None = None
+    negative_score: float | None = None
+    score: float | None = None
+    accuracy: float | None = None  # plain share of labeled sessions handled correctly
+    positive_prompts: int = 0
+    negative_prompts: int = 0
+    # True when its advantage over no skills is no larger than a useless decoy skill's.
+    matches_decoy: bool = False
+
+
+class DecoyReport(BaseModel):
+    name: str
+    sessions: int = 0  # completed sessions in which the decoy was listed
+    fired: int = 0
+    fire_rate: float | None = None
+    fired_on_negative: int = 0
+    fired_on_positive: int = 0
+    # The most listing a useless skill lifted a score by: max(decoy alone - baseline,
+    # full + decoy - full). None when those configurations were not measured.
+    advantage: float | None = None
+    flagged_configs: list[str] = Field(default_factory=list)
+    recommended_matches: bool = False
+
+
 class SkillVerdict(BaseModel):
     skill_id: str
     name: str
@@ -139,6 +171,9 @@ class SkillVerdict(BaseModel):
     recall: float | None = None
     singleton_score: float | None = None
     leave_one_out_delta: float | None = None
+    # For a skill in the recommended bundle: the recommended bundle's score minus the score of
+    # that bundle without the skill (the baseline, for a one-skill bundle), when it was measured.
+    bundle_delta: float | None = None
     selected: bool
     reasons: list[str] = Field(default_factory=list)
 
@@ -162,6 +197,13 @@ class Recommendation(BaseModel):
     insufficient_evidence: bool = False
     # True when the no-skill baseline and the best bundle differ by no more than the noise floor.
     inconclusive: bool = False
+    best_config: str = ""
+    config_scores: list[ConfigScore] = Field(default_factory=list)
+    positive_prompts_per_config: int = 0
+    negative_prompts_per_config: int = 0
+    # How much one prompt can move the balanced score (the larger of the two classes' steps).
+    noise_step: float | None = None
+    decoy: DecoyReport | None = None
     # The tolerance actually applied: at least one prompt's worth of score.
     effective_tolerance: float | None = None
     # Estimates for the sessions that ran, to compare with total_cost_usd.

@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from skills_evaluator.costs import estimate_session
+from skills_evaluator.decoy import build_decoy
 from skills_evaluator.labels import stamp_labels
 from skills_evaluator.models import (
     EvalPrompt,
@@ -21,7 +22,9 @@ from skills_evaluator.prompts import apply_label_overrides, generate_prompts, lo
 from skills_evaluator.skills import discover_candidates
 
 
-def _configurations(skill_ids: list[str]) -> tuple[list[ExperimentConfig], int]:
+def _configurations(
+    skill_ids: list[str], decoy_id: str | None = None
+) -> tuple[list[ExperimentConfig], int]:
     """Configurations in priority order, and how many of them are required.
 
     Required, in this order: the baseline, every singleton, the full bundle, then every
@@ -64,6 +67,14 @@ def _configurations(skill_ids: list[str]) -> tuple[list[ExperimentConfig], int]:
                 for left in range(pair_limit)
                 for right in range(left + 1, pair_limit)
             )
+    if decoy_id:
+        # Two extra configurations measure the control: the decoy alone against the baseline,
+        # and the full bundle with the decoy listed against the full bundle without it.
+        required.append(ExperimentConfig(id="decoy-only", skill_ids=[decoy_id], kind="decoy"))
+        if skill_ids:
+            required.append(
+                ExperimentConfig(id="decoy-full", skill_ids=[*skill_ids, decoy_id], kind="decoy")
+            )
     unique: dict[tuple[str, ...], ExperimentConfig] = {}
     for config in required:
         unique.setdefault(tuple(config.skill_ids), config)
@@ -97,6 +108,7 @@ def build_plan(
     model: str = "claude-haiku-4-5-20251001",
     seed: int = 1729,
     prompt_file: Path | None = None,
+    decoy: bool = False,
 ) -> tuple[RunPlan, Path]:
     profile = profile_project(project)
     candidates = discover_candidates(
@@ -106,14 +118,17 @@ def build_plan(
         include_anthropic,
         maximum_candidates,
     )
+    decoy_skill = build_decoy() if decoy else None
+    extra = [decoy_skill] if decoy_skill else []
+    decoy_id = decoy_skill.id if decoy_skill else None
     dropped: list[str] = []
     while candidates:
         active = [item for item in candidates if not item.blocked]
-        by_id = {item.id: item for item in candidates}
+        by_id = {item.id: item for item in [*candidates, *extra]}
         drafts = generate_prompts(profile, candidates)
         if prompt_file:
             drafts += load_prompt_file(prompt_file, candidates)[0]
-        ordered, required_count = _configurations([item.id for item in active])
+        ordered, required_count = _configurations([item.id for item in active], decoy_id)
         core = ordered[:required_count]
         core_worst = sum(_config_costs(model, profile, item, drafts, by_id)[0] for item in core)
         if len(drafts) * len(core) <= max_sessions and core_worst <= max_cost_usd:
@@ -125,7 +140,7 @@ def build_plan(
             raise ValueError(
                 "The session/cost cap cannot cover the baseline, singleton, full, and "
                 "leave-one-out tests for all explicitly requested skills. Increase "
-                "--cost-cap/--max-sessions or send fewer skills."
+                "--cost-cap/--max-sessions, send fewer skills, or run without --decoy."
             )
         candidates.remove(removable)
         dropped.append(removable.name)
@@ -142,9 +157,10 @@ def build_plan(
         prompts = apply_label_overrides(prompts, overrides)
         prompts.extend(user_prompts)
     prompts = stamp_labels(prompts, candidates)
-    by_id = {item.id: item for item in candidates}
+    plan_candidates = [*candidates, *extra]
+    by_id = {item.id: item for item in plan_candidates}
     active_ids = [item.id for item in candidates if not item.blocked]
-    all_configs, core_count = _configurations(active_ids)
+    all_configs, core_count = _configurations(active_ids, decoy_id)
     # Keep configurations in priority order until the cost cap (on the worst case) or the
     # session cap would be exceeded, but never fewer than the required set (baseline,
     # singletons, full, leave-one-outs).
@@ -169,7 +185,7 @@ def build_plan(
     plan = RunPlan(
         run_id=run_id,
         project=profile,
-        candidates=candidates,
+        candidates=plan_candidates,
         prompts=prompts,
         configurations=configs,
         model=model,
@@ -202,7 +218,8 @@ def build_plan(
     )
     (run_dir / "catalog.json").write_text(
         json.dumps(
-            [item.model_dump(mode="json", exclude={"body"}) for item in candidates], indent=2
+            [item.model_dump(mode="json", exclude={"body"}) for item in plan_candidates],
+            indent=2,
         ),
         encoding="utf-8",
     )
@@ -210,7 +227,7 @@ def build_plan(
         json.dumps(
             {
                 item.id: [finding.model_dump(mode="json") for finding in item.findings]
-                for item in candidates
+                for item in plan_candidates
             },
             indent=2,
         ),
