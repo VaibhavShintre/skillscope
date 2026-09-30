@@ -130,6 +130,12 @@ def build_advice(
             "This bundle's lead over no skills is no larger than a useless decoy skill's, so it "
             "may not come from what these skills contain."
         )
+    unstable, total = recommendation.unstable_cells, recommendation.total_cells
+    if total and unstable * 4 >= total:
+        cautions.append(
+            f"{unstable} of {total} repeated results "
+            "changed between repeats, so treat this as tentative or raise --repeats."
+        )
     return Advice(
         status="install",
         headline=f"Install {_join(names)}." if names else "No skills to install.",

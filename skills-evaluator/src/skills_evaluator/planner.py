@@ -109,7 +109,10 @@ def build_plan(
     seed: int = 1729,
     prompt_file: Path | None = None,
     decoy: bool = False,
+    repeats: int = 1,
 ) -> tuple[RunPlan, Path]:
+    if not 1 <= repeats <= 9:
+        raise ValueError("--repeats must be between 1 and 9.")
     profile = profile_project(project)
     candidates = discover_candidates(
         profile,
@@ -130,8 +133,10 @@ def build_plan(
             drafts += load_prompt_file(prompt_file, candidates)[0]
         ordered, required_count = _configurations([item.id for item in active], decoy_id)
         core = ordered[:required_count]
-        core_worst = sum(_config_costs(model, profile, item, drafts, by_id)[0] for item in core)
-        if len(drafts) * len(core) <= max_sessions and core_worst <= max_cost_usd:
+        core_worst = repeats * sum(
+            _config_costs(model, profile, item, drafts, by_id)[0] for item in core
+        )
+        if len(drafts) * len(core) * repeats <= max_sessions and core_worst <= max_cost_usd:
             break
         removable = next(
             (item for item in reversed(candidates) if not item.user_requested), None
@@ -140,7 +145,8 @@ def build_plan(
             raise ValueError(
                 "The session/cost cap cannot cover the baseline, singleton, full, and "
                 "leave-one-out tests for all explicitly requested skills. Increase "
-                "--cost-cap/--max-sessions, send fewer skills, or run without --decoy."
+                "--cost-cap/--max-sessions, send fewer skills, or lower --repeats or drop "
+                "--decoy."
             )
         candidates.remove(removable)
         dropped.append(removable.name)
@@ -168,14 +174,16 @@ def build_plan(
     worst_total = expected_total = 0.0
     for index, config in enumerate(all_configs):
         worst, expected = _config_costs(model, profile, config, prompts, by_id)
+        worst, expected = worst * repeats, expected * repeats
         if index >= core_count and (
-            worst_total + worst > max_cost_usd or (len(configs) + 1) * len(prompts) > max_sessions
+            worst_total + worst > max_cost_usd
+            or (len(configs) + 1) * len(prompts) * repeats > max_sessions
         ):
             break
         configs.append(config)
         worst_total += worst
         expected_total += expected
-    planned = len(prompts) * len(configs)
+    planned = len(prompts) * len(configs) * repeats
     if worst_total > max_cost_usd or planned > max_sessions:
         raise ValueError(
             f"The ${max_cost_usd:.2f} cap cannot cover even the baseline sessions for {model} "
@@ -195,12 +203,19 @@ def build_plan(
         estimated_max_cost_usd=round(worst_total, 6),
         estimated_expected_cost_usd=round(expected_total, 6),
         planned_sessions=planned,
+        repeats=repeats,
         dropped_candidates=dropped,
     )
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    order = [(config.id, prompt.id) for config in configs for prompt in prompts]
-    random.Random(seed).shuffle(order)
+    # One shuffled round per repeat, run in turn: a run stopped by the cost cap holds complete
+    # rounds, not one lucky cell repeated. With one repeat this is the old order and file shape.
+    order: list[list[object]] = []
+    for repeat in range(repeats):
+        round_ = [(config.id, prompt.id) for config in configs for prompt in prompts]
+        random.Random(seed + repeat).shuffle(round_)
+        for config_id, prompt_id in round_:
+            order.append([config_id, prompt_id, repeat] if repeats > 1 else [config_id, prompt_id])
     (run_dir / "session-order.json").write_text(json.dumps(order, indent=2), encoding="utf-8")
     (run_dir / "run-manifest.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
     (run_dir / "project-profile.json").write_text(
@@ -243,6 +258,7 @@ def build_plan(
                 "configurations": [item.model_dump(mode="json") for item in configs],
                 "session_order": order,
                 "planned_sessions": planned,
+                "repeats": repeats,
                 "model": model,
                 "seed": seed,
                 "max_cost_usd": max_cost_usd,
