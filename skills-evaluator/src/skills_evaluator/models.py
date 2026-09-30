@@ -159,10 +159,29 @@ class DecoyReport(BaseModel):
     recommended_matches: bool = False
 
 
+class Advice(BaseModel):
+    """The short "What to do" section: plain statements built from measured facts."""
+
+    # "install", "inconclusive", "no_skills" or "insufficient"; only "install" carries advice.
+    status: str
+    headline: str
+    keep: list[str] = Field(default_factory=list)
+    drop: list[str] = Field(default_factory=list)
+    cautions: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+
+
 class SkillVerdict(BaseModel):
     skill_id: str
     name: str
     verdict: str
+    # Facts behind the plain-language advice. `helped_with` are the kinds of task where it
+    # fired correctly (in the recommended bundle for a recommended skill); `over_fires_on` are
+    # the kinds where it fired and should not have.
+    helped_with: list[str] = Field(default_factory=list)
+    over_fires_on: list[str] = Field(default_factory=list)
+    fired: int = 0
+    sessions: int = 0  # completed sessions in which the skill was listed
     # True for skills the planner added from the public catalog, not passed with --skill.
     auto_discovered: bool = False
     # Precision is measured in the full bundle; None when no labeled prompt activated it.
@@ -204,6 +223,7 @@ class Recommendation(BaseModel):
     # How much one prompt can move the balanced score (the larger of the two classes' steps).
     noise_step: float | None = None
     decoy: DecoyReport | None = None
+    what_to_do: Advice | None = None
     # The tolerance actually applied: at least one prompt's worth of score.
     effective_tolerance: float | None = None
     # Estimates for the sessions that ran, to compare with total_cost_usd.

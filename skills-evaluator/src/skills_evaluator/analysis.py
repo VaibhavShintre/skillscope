@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from skills_evaluator.costs import estimate_session
 from skills_evaluator.labels import (
@@ -14,6 +14,7 @@ from skills_evaluator.labels import (
 from skills_evaluator.models import (
     ConfigScore,
     DecoyReport,
+    EvalPrompt,
     Recommendation,
     RunPlan,
     SessionResult,
@@ -58,6 +59,37 @@ def _balanced(positive: float | None, negative: float | None) -> float | None:
     """
     present = [value for value in (positive, negative) if value is not None]
     return sum(present) / len(present) if present else None
+
+
+def _task_kind(prompt: EvalPrompt | None, correct: bool) -> str:
+    """A short, human name for the kind of task a prompt stands for."""
+    if prompt is None:
+        return "other tasks"
+    if prompt.capability:
+        return prompt.capability
+    if prompt.origin == "skill-positive":
+        # Its own prompt when it fired correctly; another skill's prompt when it should not.
+        return "its described task" if correct else "another skill's task"
+    if prompt.origin == "near-miss":
+        return "general questions"
+    if prompt.origin == "control":
+        return "unrelated requests"
+    return prompt.id
+
+
+GENERIC_TASKS = {
+    "its described task",
+    "another skill's task",
+    "general questions",
+    "unrelated requests",
+    "other tasks",
+}
+
+
+def _top(counter: Counter[str], limit: int = 3) -> list[str]:
+    """Most frequent first; on ties the named capabilities come before the generic kinds."""
+    ranked = sorted(counter.items(), key=lambda pair: (-pair[1], pair[0] in GENERIC_TASKS, pair[0]))
+    return [kind for kind, _ in ranked][:limit]
 
 
 def _round(value: float | None) -> float | None:
@@ -199,10 +231,29 @@ def analyze(
     recommended_set = frozenset(recommended.skill_ids) if recommended else frozenset()
     recommended_score_now = score_by_skills.get(recommended_set) if recommended else None
 
+    prompt_by_id = {item.id: item for item in plan.prompts}
+    recommended_id = recommended.id if recommended else ""
     verdicts: list[SkillVerdict] = []
     for skill in plan.candidates:
         if skill.decoy:
             continue
+        # Where the skill fired correctly, and where it fired and should not have.
+        helped_here: Counter[str] = Counter()
+        helped_anywhere: Counter[str] = Counter()
+        over_fired: Counter[str] = Counter()
+        for config_id, entries in judged.items():
+            for result, label, _ in entries:
+                if skill.id not in result.selected_skills or skill.id in label.unknown:
+                    continue
+                is_expected = skill.id in label.expected
+                kind = _task_kind(prompt_by_id.get(result.prompt_id), is_expected)
+                if is_expected:
+                    helped_anywhere[kind] += 1
+                    if config_id == recommended_id:
+                        helped_here[kind] += 1
+                else:
+                    over_fired[kind] += 1
+        listed = [item for item in completed if skill.id in item.available_skills]
         # Precision is per configuration: what fraction of labeled activations in that
         # configuration were expected. An activation on a negative prompt, or on a prompt
         # that expected a different skill, is a false positive.
@@ -367,6 +418,10 @@ def analyze(
                     None if bundle_delta is None or insufficient else round(bundle_delta, 4)
                 ),
                 selected=skill.id in selected_ids,
+                helped_with=[] if insufficient else _top(helped_here or helped_anywhere),
+                over_fires_on=[] if insufficient else _top(over_fired),
+                fired=sum(skill.id in item.selected_skills for item in listed),
+                sessions=len(listed),
                 reasons=reasons,
             )
         )

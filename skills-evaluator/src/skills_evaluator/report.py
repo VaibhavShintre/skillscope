@@ -3,7 +3,8 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from skills_evaluator.models import ConfigScore, Recommendation, RunPlan
+from skills_evaluator.advice import build_advice
+from skills_evaluator.models import Advice, ConfigScore, Recommendation, RunPlan
 
 
 def _pct(value: float | None) -> str:
@@ -71,7 +72,39 @@ def _decoy_lines(recommendation: Recommendation) -> list[str]:
     return lines
 
 
-def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
+def _advice_markdown(advice: Advice) -> list[str]:
+    lines = ["## What to do", "", f"**{advice.headline}**", ""]
+    for title, items in (("Keep", advice.keep), ("Drop", advice.drop)):
+        if items:
+            lines += [f"{title}:", *[f"- {item}" for item in items], ""]
+    for item in advice.cautions:
+        lines += [f"Caution: {item}", ""]
+    if advice.steps:
+        lines += ["Steps:", *[f"{index}. {item}" for index, item in enumerate(advice.steps, 1)], ""]
+    return lines
+
+
+def _advice_html(advice: Advice) -> str:
+    def items(values: list[str]) -> str:
+        return "".join(f"<li>{html.escape(value)}</li>" for value in values)
+
+    parts = [
+        "<section class='todo'><h2>What to do</h2>",
+        f"<p class='headline'>{html.escape(advice.headline)}</p>",
+    ]
+    for title, values in (("Keep", advice.keep), ("Drop", advice.drop)):
+        if values:
+            parts.append(f"<h3>{title}</h3><ul>{items(values)}</ul>")
+    parts.extend(f"<p class='caution'>Caution: {html.escape(text)}</p>" for text in advice.cautions)
+    if advice.steps:
+        parts.append(f"<h3>Steps</h3><ol>{items(advice.steps)}</ol>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def markdown_report(
+    plan: RunPlan, recommendation: Recommendation, include_advice: bool = True
+) -> str:
     names = {item.id: item.name for item in plan.candidates}
     auto = {item.id for item in plan.candidates if not item.user_requested}
     scores = {item.id: item for item in recommendation.config_scores}
@@ -80,6 +113,8 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
         for item in recommendation.recommended_skill_ids
     ]
     lines = [f"# Skills Evaluator report: {plan.project.name}", ""]
+    if include_advice:
+        lines += _advice_markdown(recommendation.what_to_do or build_advice(plan, recommendation))
     if recommendation.insufficient_evidence:
         labeling = recommendation.labeling
         lines.extend(
@@ -212,17 +247,24 @@ def markdown_report(plan: RunPlan, recommendation: Recommendation) -> str:
 
 
 def write_reports(run_dir: Path, plan: RunPlan, recommendation: Recommendation) -> None:
+    advice = build_advice(plan, recommendation, run_dir.resolve())
+    recommendation.what_to_do = advice
     markdown = markdown_report(plan, recommendation)
     (run_dir / "recommendation.json").write_text(
         recommendation.model_dump_json(indent=2), encoding="utf-8"
     )
     (run_dir / "report.md").write_text(markdown, encoding="utf-8")
-    escaped = html.escape(markdown)
+    escaped = html.escape(markdown_report(plan, recommendation, include_advice=False))
     document = (
         "<!doctype html><meta charset='utf-8'><title>Skills Evaluator report</title>"
         "<style>body{font:15px/1.55 system-ui;max-width:1000px;margin:40px auto;padding:0 20px;"
         "color:#17231f;background:#f7f5ee}pre{white-space:pre-wrap;background:white;padding:24px;"
-        "border:1px solid #d9ddd8;border-radius:14px}</style>"
-        f"<pre>{escaped}</pre>"
+        "border:1px solid #d9ddd8;border-radius:14px}"
+        ".todo{background:white;border:1px solid #d9ddd8;border-left:6px solid #2f6f4f;"
+        "border-radius:14px;padding:8px 24px 16px;margin-bottom:20px}"
+        ".todo h2{margin:12px 0 4px}.todo h3{margin:14px 0 2px;font-size:1em}"
+        ".todo .headline{font-size:1.25em;font-weight:600;margin:4px 0 8px}"
+        ".todo .caution{color:#8a4b00}.todo ul,.todo ol{margin:2px 0}</style>"
+        f"{_advice_html(advice)}<pre>{escaped}</pre>"
     )
     (run_dir / "report.html").write_text(document, encoding="utf-8")
